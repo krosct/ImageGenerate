@@ -257,6 +257,8 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Dicas flutuantes:</strong> passe o mouse sobre os campos — cada um explica o que faz.</li>
 <li><strong>Preview de proporção:</strong> o ⓘ ao lado de “Aspect” desenha o retângulo da proporção escolhida.</li>
 <li><strong>Ícone no dock:</strong> a janela usa <code class="inline">logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
+<li><strong>Temperatura (aba Model):</strong> número 0–2, vazio = padrão do provedor; letras/símbolos/fora da faixa bloqueiam a geração com erro.</li>
+<li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 abre confirmação avisando que cada imagem pode somar custo.</li>
 </ul>
 <p>As preferências da GUI são salvas em <code class="inline">config.json</code> no cofre e restauradas na próxima abertura. Precedência: <strong>padrões &lt; config.json &lt; flags explícitas</strong>.</p>
 
@@ -269,11 +271,12 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Status ao vivo:</strong> cronômetro + estado via SSE (<code class="inline">idle, generating, done, cancelled, error</code>) e botão 🔔/🔕 do som.</li>
 <li><strong>Histórico:</strong> tabela do CSV com totais; <strong>clicar numa linha recarrega o prompt</strong> dela (branch de variação sem sobrescrever nada).</li>
 <li><strong>Modal de sucesso:</strong> ao receber a imagem, abre um aviso moderno com selo ✓, <strong>som de alerta</strong> (chime sintetizado via Web Audio, sem arquivo), preview, <strong>caminho completo</strong> com botão <em>Copy path</em> e <em>Open full size</em>. Erro toca um tom grave; cancelamento não toca nada.</li>
+<li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 pede confirmação no navegador destacando o custo adicional.</li>
 </ul>
 <div class="callout"><span class="tag">Por que o som às vezes não toca?</span>Navegadores bloqueiam áudio sem gesto do usuário. O contexto de áudio é criado no clique do Generate — se a aba estiver mutada ou o autoplay bloqueado, o modal aparece normalmente, só sem som.</div>
 
 <h3 id="web-model">Aba Model</h3>
-<p>Provedor, modelo de imagem, modelo de resumo e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
+<p>Provedor, modelo de imagem, modelo de resumo, <strong>temperatura</strong> (0–2, vazio = padrão) e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
 
 <h3 id="web-dir">Aba Dir + folder picker</h3>
 <p>Cada pasta tem input (digitar/colar) + botão <strong>Browse…</strong>, que abre um modal navegando nas <strong>pastas reais da máquina</strong> (o servidor é local): caminho atual, ⬆ Up, ⌂ Home, lista de subpastas, criar nova pasta e <em>Use this folder</em>.</p>
@@ -353,10 +356,11 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">--context-dir / --memory-dir</code></td><td>Pastas de contexto (.md/.txt) e referências visuais</td></tr>
 <tr><td><code class="inline">--provider / --model</code></td><td>Provedor e modelo de imagem</td></tr>
 <tr><td><code class="inline">--prop / --resolution / --output-format</code></td><td>Proporção, tier de resolução, formato</td></tr>
-<tr><td><code class="inline">--seed / --count</code></td><td>Seed de reprodutibilidade / nº de imagens</td></tr>
+<tr><td><code class="inline">--seed / --count</code></td><td>Seed de reprodutibilidade / nº de imagens (natural 1–10; acima de 1 pede confirmação nas interfaces por causa do custo)</td></tr>
 <tr><td><code class="inline">--api-key / --remember-key / --forget-key</code></td><td>Chave desta vez / guardar no cofre / apagar do cofre</td></tr>
 <tr><td><code class="inline">--summary-model</code></td><td>Chat que resume o prompt (vazio = truncamento local grátis)</td></tr>
 <tr><td><code class="inline">--timeout / --dry-run</code></td><td>Timeout HTTP / placeholder local sem gastar nada</td></tr>
+<tr><td><code class="inline">--temperature</code></td><td>Temperatura 0–2 (vazio = padrão do provedor; não documentado na API de imagens — suporte varia por modelo)</td></tr>
 <tr><td><code class="inline">--gui / --list-log</code></td><td>Abre a GUI / imprime o CSV e sai</td></tr>
 </table>
 

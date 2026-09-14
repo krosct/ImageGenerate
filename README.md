@@ -48,4 +48,4 @@ Mesmas 3 abas, cronômetro ao vivo, Cancel e log — só local. 🔒
 
 ## ⌨️ Flags úteis
 
-`--provider` `--prop` `--resolution` `--context-dir` `--memory-dir` `--remember-key` `--forget-key` `--model` `--seed`
+`--provider` `--prop` `--resolution` `--context-dir` `--memory-dir` `--remember-key` `--forget-key` `--model` `--seed` `--count` `--temperature`
