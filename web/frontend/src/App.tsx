@@ -51,13 +51,17 @@ export default function App() {
             <div className="brand-sub">Generating your thoughts!</div>
           </span>
         </div>
-        <nav className="tabs">
-          {(['generate', 'model', 'dir'] as const).map((t) => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-              {t[0].toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </nav>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <nav className="tabs">
+            {(['generate', 'model', 'dir'] as const).map((t) => (
+              <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+                {t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </nav>
+          <a className="help-btn" href="/help" target="_blank" rel="noreferrer"
+            title="Open docs (docs.html)">?</a>
+        </div>
       </header>
 
       {tab === 'generate' && (

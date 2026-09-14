@@ -1243,6 +1243,23 @@ def run_gui(defaults: dict | None = None) -> None:
         ttk.Label(header, image=state["logo_img"]).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(header, text="ImageGenerate",
                   font=("", 14, "bold")).pack(side=tk.LEFT)
+    else:
+        header = ttk.Frame(root, padding=(8, 8, 8, 0))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="ImageGenerate",
+                  font=("", 14, "bold")).pack(side=tk.LEFT)
+
+    def open_docs() -> None:
+        """Open docs.html (repo root) in the default browser."""
+        import webbrowser
+
+        docs = Path(__file__).resolve().parent / "docs.html"
+        if docs.is_file():
+            webbrowser.open(docs.as_uri())
+        else:
+            messagebox.showwarning("Docs", f"docs.html not found:\n{docs}")
+
+    ttk.Button(header, text="?", width=3, command=open_docs).pack(side=tk.RIGHT)
 
     def pick_dir(var: tk.StringVar) -> None:
         chosen = filedialog.askdirectory()

@@ -110,6 +110,24 @@ nav.tabs button {
 nav.tabs button:hover { color: var(--text-primary); }
 nav.tabs button.active { background: var(--panel-3); color: var(--text-primary); }
 
+/* Help (?) button: same pill language as the tabs */
+.help-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-weight: 700;
+  font-size: 15px;
+  text-decoration: none;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.help-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
 /* ---- hero ---- */
 /* Logo as a full-screen watermark behind the site: screen-sized,
    rotated 30deg, very low opacity, edges melted into the canvas. */

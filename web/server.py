@@ -341,6 +341,20 @@ def api_forget_key(provider: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Docs page (repo-root docs.html, single file, no dependencies)
+# ---------------------------------------------------------------------------
+
+DOCS = Path(__file__).resolve().parent.parent / "docs.html"
+
+
+@app.get("/help", include_in_schema=False)
+def api_docs():
+    if not DOCS.is_file():
+        raise HTTPException(404, "docs.html not found (see repo root)")
+    return FileResponse(DOCS, media_type="text/html")
+
+
+# ---------------------------------------------------------------------------
 # Frontend static (Vite build output)
 # ---------------------------------------------------------------------------
 
