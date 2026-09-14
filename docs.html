@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="description" content="ImageGenerate — documentação completa (CLI, GUI e Web)" />
 <title>ImageGenerate — Docs</title>
+<link rel="icon" type="image/png" href="logo.png" />
 <style>
 :root{
   --bg:#09090c; --bg-soft:#101014; --panel:#141419; --panel-2:#1c1c22;
@@ -34,6 +35,14 @@ body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--text);
   text-decoration:none;color:var(--text);font-size:15px}
 .brand-mark{width:26px;height:26px;border-radius:8px;background:#fff;color:#111;
   display:grid;place-items:center;font-size:14px}
+.brand-logo{width:26px;height:26px;border-radius:8px;object-fit:contain;background:#fff;padding:2px;flex:none}
+/* themed scrollbars (webkit + firefox), both themes */
+html{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+.no-result{padding:8px 10px;font-size:12.5px;color:var(--muted)}
 .topbar input[type=search]{margin-left:auto;background:var(--panel);border:1px solid var(--border);
   border-radius:999px;color:var(--text);font:inherit;font-size:13px;padding:7px 14px;width:220px;outline:0}
 .topbar input[type=search]:focus{border-color:var(--accent)}
@@ -118,7 +127,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <body>
 <header class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
-  <a class="brand" href="#top"><span class="brand-mark">◐</span> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
+  <a class="brand" href="#top"><img class="brand-logo" src="logo.png" alt="ImageGenerate logo" /> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
   <input type="search" id="search" placeholder="Filtrar menu…" aria-label="Filtrar menu" />
   <button class="theme-btn" id="themeBtn" title="Alternar tema">🌙 / ☀️</button>
 </header>
@@ -149,6 +158,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
   <a href="#flags">Tabela de flags</a>
   <a href="#arquivos">Arquivos e pastas</a>
   <a href="#problemas">Solução de problemas</a>
+  <div class="no-result" id="noResult" style="display:none">Nada encontrado.</div>
 </nav>
 
 <main class="content" id="top">
@@ -390,10 +400,40 @@ document.getElementById('themeBtn').addEventListener('click', () => {
 const sidebar = document.getElementById('sidebar');
 document.getElementById('menuBtn').addEventListener('click', () => sidebar.classList.toggle('open'));
 sidebar.querySelectorAll('a').forEach(a => a.addEventListener('click', () => sidebar.classList.remove('open')));
-// Sidebar search filter
-document.getElementById('search').addEventListener('input', (e) => {
-  const q = e.target.value.toLowerCase();
-  sidebar.querySelectorAll('a').forEach(a => a.classList.toggle('hide', q !== '' && !a.textContent.toLowerCase().includes(q)));
+// Sidebar search: case-insensitive, matches menu label AND section content.
+// (Filtering only by label is why terms like "cofre" found nothing.)
+const searchInput = document.getElementById('search');
+const noResult = document.getElementById('noResult');
+const sideLinks = [...sidebar.querySelectorAll('a[href^="#"]')];
+const sectionIndex = new Map();
+sideLinks.forEach(a => {
+  const el = document.getElementById(a.getAttribute('href').slice(1));
+  if (!el) return;
+  let text = (a.textContent + ' ' + el.textContent).toLowerCase();
+  const stop = el.tagName === 'H2' ? ['H2'] : ['H2', 'H3'];
+  let sib = el.nextElementSibling;
+  while (sib && !stop.includes(sib.tagName)) {
+    text += ' ' + sib.textContent.toLowerCase();
+    sib = sib.nextElementSibling;
+  }
+  sectionIndex.set(a, text);
+});
+function runSearch() {
+  const q = searchInput.value.trim().toLowerCase();
+  let visible = 0;
+  sideLinks.forEach(a => {
+    const hit = q === '' || (sectionIndex.get(a) || '').includes(q);
+    a.classList.toggle('hide', !hit);
+    if (hit) visible++;
+  });
+  noResult.style.display = visible ? 'none' : 'block';
+}
+searchInput.addEventListener('input', runSearch);
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const first = sidebar.querySelector('a[href^="#"]:not(.hide)');
+    if (first) { location.hash = first.getAttribute('href'); sidebar.classList.remove('open'); }
+  }
 });
 // Copy buttons
 document.querySelectorAll('.copy-btn').forEach(btn => {
