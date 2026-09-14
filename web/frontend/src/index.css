@@ -1,0 +1,32 @@
+body { font-family: system-ui, sans-serif; margin: 0; background: #1e1e1e; color: #e8e8e8; }
+.app { max-width: 1100px; margin: 0 auto; padding: 16px; }
+nav.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+nav.tabs button { padding: 8px 20px; border: 1px solid #444; background: #2d2d2d; color: #e8e8e8; cursor: pointer; border-radius: 6px 6px 0 0; }
+nav.tabs button.active { background: #0e639c; border-color: #0e639c; }
+.card { background: #252526; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+label { display: block; margin: 8px 0 4px; font-size: 0.9em; color: #bbb; }
+input[type=text], input[type=password], select, textarea { width: 100%; box-sizing: border-box; background: #3c3c3c; color: #e8e8e8; border: 1px solid #555; border-radius: 4px; padding: 6px 8px; }
+textarea { min-height: 110px; resize: vertical; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.row > div { flex: 1; min-width: 120px; }
+button.primary { background: #0e639c; color: white; border: none; padding: 8px 24px; border-radius: 4px; cursor: pointer; font-size: 1em; }
+button.primary:disabled { background: #555; cursor: default; }
+button.ghost { background: #3c3c3c; color: #e8e8e8; border: 1px solid #555; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+button.ghost:disabled { opacity: 0.4; cursor: default; }
+.clock { font-size: 1.2em; font-weight: bold; margin-left: 16px; }
+.status { margin-left: 12px; color: #9cdcfe; }
+.spinner { width: 120px; height: 8px; background: #3c3c3c; border-radius: 4px; overflow: hidden; margin-left: 12px; display: inline-block; vertical-align: middle; }
+.spinner > div { height: 100%; width: 30%; background: #0e639c; border-radius: 4px; animation: slide 1s infinite linear; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+table.log { border-collapse: collapse; width: 100%; font-size: 0.8em; }
+table.log th, table.log td { border: 1px solid #444; padding: 4px 8px; text-align: left; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.log th { background: #2d2d2d; position: sticky; top: 0; }
+table.log tr:hover td { background: #2a3a4a; cursor: pointer; }
+.logwrap { overflow: auto; max-height: 340px; }
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
+.modal { background: #252526; border: 1px solid #555; border-radius: 8px; padding: 20px; max-width: 640px; width: 90%; }
+.modal img { max-width: 100%; border-radius: 4px; margin: 8px 0; }
+.ratio-tip { display: inline-block; margin-left: 8px; cursor: help; color: #9cdcfe; position: relative; }
+.ratio-preview { display: none; position: absolute; left: 20px; top: -10px; background: white; padding: 8px; border-radius: 4px; z-index: 10; }
+.ratio-tip:hover .ratio-preview { display: block; }
+.hint { font-size: 0.8em; color: #888; }

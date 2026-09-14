@@ -51,6 +51,12 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
 # Translations
 *.mo
 *.pot
@@ -216,3 +222,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent instructions (not shared)
+AGENTS.md

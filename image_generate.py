@@ -57,7 +57,6 @@ API_URL = "https://openrouter.ai/api/v1/images"
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "meta/muse-image"
 DEFAULT_PROVIDER = "openrouter"
-SUMMARY_MODEL = "openrouter/free"
 LOG_FILENAME = "log_image_generate.csv"
 
 ASPECT_RATIOS = [
@@ -240,6 +239,77 @@ def resolve_api_key(provider: str, cli_key: str | None = None) -> tuple[str | No
     return None, "none"
 
 
+CONFIG_FILENAME = "config.json"
+
+CONFIG_KEYS = (
+    "output_dir",
+    "context_dir",
+    "memory_dir",
+    "provider",
+    "model",
+    "summary_model",
+    "prop",
+    "resolution",
+    "output_format",
+    "dry_run",
+)
+
+
+def config_path() -> Path:
+    return vault_dir() / CONFIG_FILENAME
+
+
+def load_gui_config() -> dict:
+    """Load persisted GUI settings (missing/corrupt file -> {})."""
+    path = config_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: data[k] for k in CONFIG_KEYS if k in data}
+
+
+def save_gui_config(settings: dict) -> Path:
+    """Persist GUI settings atomically (only known keys)."""
+    directory = vault_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    path = config_path()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({k: settings[k] for k in CONFIG_KEYS if k in settings},
+                              indent=2, ensure_ascii=False) + "\n",
+                   encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
+def sanitize_gui_config(data: dict) -> dict:
+    """Clamp loaded settings to valid values."""
+    clean: dict = {}
+    for key in ("output_dir", "context_dir", "memory_dir", "model", "summary_model"):
+        value = data.get(key, "")
+        if isinstance(value, str):
+            clean[key] = value
+    try:
+        clean["provider"] = normalize_provider(str(data.get("provider", DEFAULT_PROVIDER)))
+    except ValueError:
+        clean["provider"] = DEFAULT_PROVIDER
+    prop = str(data.get("prop", "1:1"))
+    clean["prop"] = prop if prop in ASPECT_RATIOS else "1:1"
+    res = str(data.get("resolution", "1K"))
+    clean["resolution"] = res if res in RESOLUTIONS else "1K"
+    fmt = str(data.get("output_format", "png"))
+    clean["output_format"] = fmt if fmt in OUTPUT_FORMATS else "png"
+    clean["dry_run"] = bool(data.get("dry_run", False))
+    return clean
+
+
 # ---------------------------------------------------------------------------
 # Context / memory helpers
 # ---------------------------------------------------------------------------
@@ -380,14 +450,14 @@ def summarize_prompt_remote(
 def summarize_prompt(
     prompt: str,
     api_key: str | None = None,
-    model: str = SUMMARY_MODEL,
+    model: str = "",
     timeout_s: int = SUMMARY_TIMEOUT_S,
     cancel_event: threading.Event | None = None,
 ) -> str:
-    """Summarize prompt via free OpenRouter model, fallback to truncation."""
-    if api_key:
+    """Summarize prompt via chat model; empty model skips to truncation (no API call)."""
+    if api_key and model.strip():
         try:
-            return summarize_prompt_remote(prompt, api_key, model, timeout_s, cancel_event)
+            return summarize_prompt_remote(prompt, api_key, model.strip(), timeout_s, cancel_event)
         except GenerationCancelled:
             raise
         except Exception as exc:
@@ -681,9 +751,14 @@ def extension_for(media_type: str | None, fallback: str) -> str:
 
 
 def save_images(
-    output_dir: Path, payload: dict, output_format: str, stamp: str, request_start: float
+    output_dir: Path, payload: dict, output_format: str, stamp: str, request_start: float,
+    collected: list | None = None,
 ) -> tuple[list[Path], float]:
-    """Decode b64_json images to disk. Returns (paths, receive_ts)."""
+    """Decode b64_json images to disk. Returns (paths, receive_ts).
+
+    Appends each file to collected (if given) right after writing, so
+    cancellation can remove files saved before the abort.
+    """
     items = payload.get("data", [])
     if not items:
         raise RuntimeError(f"API returned no images: {str(payload)[:500]}")
@@ -701,6 +776,8 @@ def save_images(
             counter += 1
         path.write_bytes(base64.b64decode(b64))
         paths.append(path)
+        if collected is not None:
+            collected.append(path)
     receive_ts = time.time()
     _ = request_start
     return paths, receive_ts
@@ -767,7 +844,7 @@ def run_generation(
     api_key: str | None,
     timeout_s: int = REQUEST_TIMEOUT_S,
     dry_run: bool = False,
-    summary_model: str = SUMMARY_MODEL,
+    summary_model: str = "",
     provider: str = DEFAULT_PROVIDER,
     cancel_event: threading.Event | None = None,
 ) -> dict:
@@ -800,6 +877,8 @@ def run_generation(
     def fetch_images() -> None:
         try:
             local_paths: list[Path] = []
+            # Registered upfront so cancellation removes files saved so far.
+            image_box["paths"] = local_paths
             local_cost = 0.0
             local_created = ""
             local_raw: int | float | str = ""
@@ -841,7 +920,8 @@ def run_generation(
                     cancel_event=cancel_event,
                 )
                 stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                local_paths, receive_ts = save_images(out, payload, output_format, stamp, request_start)
+                local_paths, receive_ts = save_images(
+                    out, payload, output_format, stamp, request_start, local_paths)
                 _ = receive_ts
                 usage = payload.get("usage", {}) if isinstance(payload.get("usage"), dict) else {}
                 try:
@@ -978,8 +1058,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Encrypt and remember the key in the provider vault.")
     parser.add_argument("--forget-key", action="store_true",
                         help="Delete the remembered key for the provider and exit.")
-    parser.add_argument("--summary-model", default=SUMMARY_MODEL,
-                        help="Free chat model used to summarize the prompt for the log.")
+    parser.add_argument("--summary-model", default="",
+                        help="Chat model used to summarize the prompt for the log "
+                             "(empty = local truncation, no API call).")
     parser.add_argument("--timeout", type=int, default=REQUEST_TIMEOUT_S)
     parser.add_argument("--dry-run", action="store_true", help="Skip API, write placeholder PNG.")
     parser.add_argument("--gui", action="store_true", help="Force GUI mode.")
@@ -1086,6 +1167,9 @@ def run_gui(defaults: dict | None = None) -> None:
     from tkinter import filedialog, messagebox, ttk
 
     defaults = defaults or {}
+    # Precedence: hard defaults < config.json < explicit caller defaults.
+    saved = sanitize_gui_config(load_gui_config())
+    merged = {**saved, **{k: v for k, v in defaults.items() if v not in (None, "")}}
     root = tk.Tk()
     root.title("image_generate.py")
     root.geometry("860x720")
@@ -1107,25 +1191,26 @@ def run_gui(defaults: dict | None = None) -> None:
     notebook.add(tab_model, text="Model")
     notebook.add(tab_dir, text="Dir")
 
-    out_var = tk.StringVar(value=str(defaults.get("output_dir") or default_output_dir()))
-    ctx_var = tk.StringVar(value=str(defaults.get("context_dir", "")))
-    mem_var = tk.StringVar(value=str(defaults.get("memory_dir", "")))
-    provider_var = tk.StringVar(value=str(defaults.get("provider") or DEFAULT_PROVIDER))
+    out_var = tk.StringVar(value=str(merged.get("output_dir") or default_output_dir()))
+    ctx_var = tk.StringVar(value=str(merged.get("context_dir", "")))
+    mem_var = tk.StringVar(value=str(merged.get("memory_dir", "")))
+    provider_var = tk.StringVar(value=str(merged.get("provider") or DEFAULT_PROVIDER))
     try:
         provider_var.set(normalize_provider(provider_var.get()))
     except ValueError:
         provider_var.set(DEFAULT_PROVIDER)
     model_var = tk.StringVar(value=str(
-        defaults.get("model") or PROVIDERS[provider_var.get()]["default_model"]
+        merged.get("model") or PROVIDERS[provider_var.get()]["default_model"]
     ))
-    prop_var = tk.StringVar(value=str(defaults.get("prop", "1:1")))
-    res_var = tk.StringVar(value=str(defaults.get("resolution", "1K")))
-    fmt_var = tk.StringVar(value=str(defaults.get("output_format", "png")))
+    summary_var = tk.StringVar(value=str(merged.get("summary_model", "")))
+    prop_var = tk.StringVar(value=str(merged.get("prop", "1:1")))
+    res_var = tk.StringVar(value=str(merged.get("resolution", "1K")))
+    fmt_var = tk.StringVar(value=str(merged.get("output_format", "png")))
     seed_var = tk.StringVar(value="")
     _initial_key, _initial_source = resolve_api_key(provider_var.get())
     key_var = tk.StringVar(value=_initial_key or "")
     remember_var = tk.BooleanVar(value=_initial_source == "vault")
-    dry_var = tk.BooleanVar(value=False)
+    dry_var = tk.BooleanVar(value=bool(merged.get("dry_run", False)))
 
     def reload_key_for_provider(update_model: bool = True) -> None:
         try:
@@ -1138,6 +1223,37 @@ def run_gui(defaults: dict | None = None) -> None:
         key_var.set(key or "")
         remember_var.set(source == "vault")
 
+    def attach_help(widget: object, text: str) -> None:
+        """Short hover tooltip explaining a widget to new users."""
+        tip: dict = {"window": None}
+
+        def show(_event: object = None) -> None:
+            hide()
+            window = tk.Toplevel(root)
+            window.wm_overrideredirect(True)
+            window.wm_attributes("-topmost", True)
+            label = ttk.Label(window, text=text, wraplength=280, justify=tk.LEFT,
+                              background="#ffffe0", relief=tk.SOLID, borderwidth=1)
+            label.pack(padx=2, pady=2)
+            x = widget.winfo_rootx() + 16  # type: ignore[attr-defined]
+            y = widget.winfo_rooty() + widget.winfo_height() + 4  # type: ignore[attr-defined]
+            window.wm_geometry(f"+{x}+{y}")
+            tip["window"] = window
+
+        def hide(_event: object = None) -> None:
+            window = tip.get("window")
+            if window is not None:
+                try:
+                    window.destroy()  # type: ignore[attr-defined]
+                except tk.TclError:
+                    pass
+                tip["window"] = None
+
+        widget.bind("<Enter>", show)  # type: ignore[attr-defined]
+        widget.bind("<Leave>", hide)  # type: ignore[attr-defined]
+
+    VAULT_HELP = str(vault_dir())
+
     # ---- Model tab: provider, model, api key ----
     ttk.Label(tab_model, text="Provider:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
     provider_combo = ttk.Combobox(tab_model, textvariable=provider_var,
@@ -1146,24 +1262,35 @@ def run_gui(defaults: dict | None = None) -> None:
     provider_combo.bind("<<ComboboxSelected>>", lambda _e: reload_key_for_provider())
     ttk.Label(tab_model, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=4, pady=2)
     ttk.Entry(tab_model, textvariable=model_var, width=60).grid(row=1, column=1, sticky=tk.EW, padx=4)
-    ttk.Label(tab_model, text="API key:").grid(row=2, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(tab_model, text="Summary model:").grid(row=2, column=0, sticky=tk.W, padx=4, pady=2)
+    summary_entry = ttk.Entry(tab_model, textvariable=summary_var, width=60)
+    summary_entry.grid(row=2, column=1, sticky=tk.EW, padx=4)
+    attach_help(summary_entry,
+                "Chat model that writes the 1-sentence log summary. "
+                "Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. "
+                "Required: generation will not start with this field empty.")
+    ttk.Label(tab_model, text="API key:").grid(row=3, column=0, sticky=tk.W, padx=4, pady=2)
     key_row = ttk.Frame(tab_model)
-    key_row.grid(row=2, column=1, sticky=tk.EW, padx=4)
+    key_row.grid(row=3, column=1, sticky=tk.EW, padx=4)
     ttk.Entry(key_row, textvariable=key_var, width=44, show="*").pack(side=tk.LEFT, fill=tk.X, expand=True)
     remember_check = ttk.Checkbutton(key_row, text="remember me", variable=remember_var)
     remember_check.pack(side=tk.LEFT, padx=8)
     if not HAS_FERNET:
         remember_check.configure(state=tk.DISABLED)
         remember_check.configure(text="remember me (needs: pip install cryptography)")
-    ttk.Button(key_row, text="Forget",
-               command=lambda: on_forget_key()).pack(side=tk.LEFT)
+    forget_btn = ttk.Button(key_row, text="Forget",
+                            command=lambda: on_forget_key())
+    forget_btn.pack(side=tk.LEFT)
     tab_model.columnconfigure(1, weight=1)
 
     # ---- Dir tab: output / context / memory dirs ----
     drow = 0
+    dir_entries: dict = {}
     for label, var in (("Output dir:", out_var), ("Context dir:", ctx_var), ("Memory dir:", mem_var)):
         ttk.Label(tab_dir, text=label).grid(row=drow, column=0, sticky=tk.W, padx=4, pady=2)
-        ttk.Entry(tab_dir, textvariable=var, width=60).grid(row=drow, column=1, sticky=tk.EW, padx=4)
+        entry = ttk.Entry(tab_dir, textvariable=var, width=60)
+        entry.grid(row=drow, column=1, sticky=tk.EW, padx=4)
+        dir_entries[label] = entry
         ttk.Button(tab_dir, text="Browse", command=lambda v=var: pick_dir(v)).grid(
             row=drow, column=2, padx=4
         )
@@ -1183,7 +1310,8 @@ def run_gui(defaults: dict | None = None) -> None:
     ttk.Combobox(opts, textvariable=fmt_var, values=OUTPUT_FORMATS, width=6, state="readonly").pack(side=tk.LEFT)
     ttk.Label(opts, text="Seed:").pack(side=tk.LEFT, padx=(12, 4))
     ttk.Entry(opts, textvariable=seed_var, width=8).pack(side=tk.LEFT)
-    ttk.Checkbutton(opts, text="dry-run", variable=dry_var).pack(side=tk.LEFT, padx=12)
+    dry_check = ttk.Checkbutton(opts, text="dry-run", variable=dry_var)
+    dry_check.pack(side=tk.LEFT, padx=12)
 
     tooltip: dict = {"window": None, "canvas": None, "label": None}
 
@@ -1258,12 +1386,8 @@ def run_gui(defaults: dict | None = None) -> None:
     prompt_text.pack(fill=tk.BOTH, expand=True)
 
     # ---- collapsible log list (spoiler, hidden by default) ----
-    log_frame = ttk.LabelFrame(tab_generate, text="log_image_generate.csv", padding=8)
+    log_frame = ttk.LabelFrame(tab_generate, text="Summary", padding=8)
     columns = tuple(LOG_FIELDS)
-    log_toolbar = ttk.Frame(log_frame)
-    log_toolbar.pack(fill=tk.X, pady=(0, 4))
-    ttk.Button(log_toolbar, text="Refresh log",
-               command=lambda: refresh_log()).pack(side=tk.RIGHT)
     list_container = ttk.Frame(log_frame)
     list_container.pack(fill=tk.BOTH, expand=True)
     tree = ttk.Treeview(list_container, columns=columns, show="headings", height=8)
@@ -1282,7 +1406,11 @@ def run_gui(defaults: dict | None = None) -> None:
     list_container.grid_rowconfigure(0, weight=1)
     list_container.grid_columnconfigure(0, weight=1)
     total_var = tk.StringVar(value="total: 0 ops / $0.000000")
-    ttk.Label(log_frame, textvariable=total_var).pack(side=tk.BOTTOM, anchor=tk.W)
+    log_bottom = ttk.Frame(log_frame)
+    log_bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+    ttk.Label(log_bottom, textvariable=total_var).pack(side=tk.LEFT, anchor=tk.W)
+    ttk.Button(log_bottom, text="Refresh log",
+               command=lambda: refresh_log()).pack(side=tk.RIGHT)
 
     # ---- actions + clock (Generate tab) ----
     bar = ttk.Frame(tab_generate, padding=(4, 4))
@@ -1292,12 +1420,14 @@ def run_gui(defaults: dict | None = None) -> None:
     cancel_btn = ttk.Button(bar, text="Cancel", state=tk.DISABLED)
     cancel_btn.pack(side=tk.LEFT, padx=4)
     clock_var = tk.StringVar(value="elapsed: 0.0s")
-    ttk.Label(bar, textvariable=clock_var, font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT, padx=16)
+    clock_label = ttk.Label(bar, textvariable=clock_var, font=("TkDefaultFont", 11, "bold"))
+    clock_label.pack(side=tk.LEFT, padx=16)
     spin = ttk.Progressbar(bar, mode="indeterminate", length=120)
     spin.pack(side=tk.LEFT, padx=4)
     spin.pack_forget()  # only visible while generating
     status_var = tk.StringVar(value="idle")
-    ttk.Label(bar, textvariable=status_var).pack(side=tk.LEFT, padx=8)
+    status_label = ttk.Label(bar, textvariable=status_var)
+    status_label.pack(side=tk.LEFT, padx=8)
     spoiler_state = {"visible": False}
     spoiler_btn = ttk.Button(bar, text="Show log \u25bc")
     spoiler_btn.pack(side=tk.RIGHT)
@@ -1314,6 +1444,28 @@ def run_gui(defaults: dict | None = None) -> None:
             spoiler_btn.configure(text="Show log \u25bc")
 
     spoiler_btn.configure(command=toggle_log)
+
+    # ---- help tooltips for new users (hover to read) ----
+    attach_help(dir_entries["Output dir:"],
+                "Folder where generated images and log_image_generate.csv are saved. "
+                f"Default: {default_output_dir()}.")
+    attach_help(dir_entries["Context dir:"],
+                "Folder with .md/.txt files automatically added to the prompt as context.")
+    attach_help(dir_entries["Memory dir:"],
+                "Folder with reference images sent along with the prompt to guide generation.")
+    attach_help(dry_check,
+                "Test run without spending anything: writes a local placeholder image "
+                "instead of calling the paid API.")
+    attach_help(clock_label,
+                "Time from sending the request until the image arrives.")
+    attach_help(status_label,
+                "Current state: idle (waiting), generating, done, cancelled or error.")
+    attach_help(remember_check,
+                "Encrypt and save this key so you don't type it again. Stored in "
+                f"{VAULT_HELP}/<provider>_api_key.enc (secret in <provider>.fkey).")
+    attach_help(forget_btn,
+                "Delete the saved key and its local secret (<provider>_api_key.enc and "
+                f"<provider>.fkey) from {VAULT_HELP}/.")
 
     def tick_clock() -> None:
         if state["running"]:
@@ -1483,6 +1635,11 @@ def run_gui(defaults: dict | None = None) -> None:
         if not prompt:
             messagebox.showwarning("Missing prompt", "Type a prompt first.")
             return
+        summary_model = summary_var.get().strip()
+        if not summary_model:
+            messagebox.showwarning("Missing summary model",
+                                   "Fill in Summary model first (Model tab).")
+            return
         seed_raw = seed_var.get().strip()
         seed = int(seed_raw) if seed_raw.lstrip("-").isdigit() else None
         try:
@@ -1510,6 +1667,7 @@ def run_gui(defaults: dict | None = None) -> None:
             "count": 1,
             "api_key": api_key,
             "dry_run": bool(dry_var.get()),
+            "summary_model": summary_model,
             "provider": current_provider,
             "cancel_event": threading.Event(),
         }
@@ -1517,6 +1675,7 @@ def run_gui(defaults: dict | None = None) -> None:
         state["cancel_event"] = kwargs["cancel_event"]
         state["start"] = time.perf_counter()
         state["elapsed"] = 0.0
+        persist_gui_config()
         gen_btn.configure(state=tk.DISABLED)
         cancel_btn.configure(state=tk.NORMAL)
         spin.pack(side=tk.LEFT, padx=4)
@@ -1525,9 +1684,33 @@ def run_gui(defaults: dict | None = None) -> None:
         tick_clock()
         threading.Thread(target=worker, args=(prompt, kwargs), daemon=True).start()
 
+    def persist_gui_config() -> None:
+        try:
+            save_gui_config({
+                "output_dir": out_var.get().strip(),
+                "context_dir": ctx_var.get().strip(),
+                "memory_dir": mem_var.get().strip(),
+                "provider": provider_var.get().strip(),
+                "model": model_var.get().strip(),
+                "summary_model": summary_var.get().strip(),
+                "prop": prop_var.get().strip(),
+                "resolution": res_var.get().strip(),
+                "output_format": fmt_var.get().strip(),
+                "dry_run": bool(dry_var.get()),
+            })
+        except OSError:
+            pass
+
     gen_btn.configure(command=on_generate)
     cancel_btn.configure(command=on_cancel)
     refresh_log()
+
+    def on_close() -> None:
+        if not state["running"]:
+            persist_gui_config()
+            root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 
 
@@ -1548,16 +1731,25 @@ def main(argv: list[str] | None = None) -> int:
             return main_cli(args)
         if resolve_prompt(args).strip() and not args.gui:
             return main_cli(args)
-        run_gui({
-            "output_dir": args.output_dir or default_output_dir(),
-            "context_dir": args.context_dir,
-            "memory_dir": args.memory_dir,
-            "model": args.model,
-            "provider": args.provider,
-            "prop": args.prop,
-            "resolution": args.resolution,
-            "output_format": args.output_format,
-        })
+        # Only explicit CLI flags override config.json in the GUI.
+        raw_argv = argv if argv is not None else sys.argv[1:]
+        flag_map = {
+            "--output-dir": "output_dir",
+            "--context-dir": "context_dir",
+            "--memory-dir": "memory_dir",
+            "--model": "model",
+            "--summary-model": "summary_model",
+            "--provider": "provider",
+            "--prop": "prop",
+            "--aspect-ratio": "prop",
+            "--resolution": "resolution",
+            "--output-format": "output_format",
+        }
+        gui_defaults = {}
+        for flag, key in flag_map.items():
+            if any(a == flag or a.startswith(flag + "=") for a in raw_argv):
+                gui_defaults[key] = getattr(args, key)
+        run_gui(gui_defaults)
         return 0
     return main_cli(args)
 
