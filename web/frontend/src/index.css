@@ -111,30 +111,34 @@ nav.tabs button:hover { color: var(--text-primary); }
 nav.tabs button.active { background: var(--panel-3); color: var(--text-primary); }
 
 /* ---- hero ---- */
-.hero {
-  display: flex;
-  align-items: center;
-  gap: 32px;
-  padding: 26px 0 18px;
-  text-align: left;
+/* Featured artwork as ambient page background on the dark left edge. */
+.page-bg {
+  position: fixed;
+  left: max(-60px, calc((100vw - 1080px) / 2 - 340px));
+  top: 46%;
+  transform: translateY(-50%);
+  width: clamp(300px, 30vw, 480px);
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
 }
-.hero-featured {
+.page-bg img {
   display: block;
-  flex: 0 0 300px;
-  width: 300px;
-  max-width: 32vw;
+  width: 100%;
   height: auto;
-  margin: 0;
   border: 0;
-  border-radius: 0;
-  /* Soft fading so the edges melt into the black canvas. */
-  -webkit-mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, #000 58%, transparent 100%);
-  mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, #000 58%, transparent 100%);
+  /* Strong melt into the black canvas on every edge. */
+  -webkit-mask-image: radial-gradient(ellipse 72% 72% at 50% 50%, #000 28%, transparent 70%);
+  mask-image: radial-gradient(ellipse 72% 72% at 50% 50%, #000 28%, transparent 70%);
 }
-.hero-copy { min-width: 0; flex: 1; }
+.app { position: relative; z-index: 1; }
+.hero { text-align: center; padding: 26px 0 18px; }
+.hero-copy { min-width: 0; }
+@media (max-width: 1100px) {
+  .page-bg { opacity: 0.35; }
+}
 @media (max-width: 720px) {
-  .hero { flex-direction: column; text-align: center; }
-  .hero-featured { width: 62%; max-width: 300px; }
+  .page-bg { display: none; }
 }
 .hero h1 {
   margin: 0;

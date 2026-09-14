@@ -38,6 +38,10 @@ export default function App() {
   }
 
   return (
+    <>
+    <div className="page-bg" aria-hidden="true">
+      <img src="/logo-titulo.png" alt="" />
+    </div>
     <div className="app">
       <header className="topbar">
         <div className="brand">
@@ -58,7 +62,6 @@ export default function App() {
 
       {tab === 'generate' && (
         <section className="hero">
-          <img className="hero-featured" src="/logo-titulo.png" alt="ImageGenerate — featured" />
           <div className="hero-copy">
             <div className="mono-label">AI image generate</div>
             <h1>Describe it. Generate it. Keep iterating.</h1>
@@ -102,5 +105,6 @@ export default function App() {
         />
       )}
     </div>
+    </>
   )
 }
