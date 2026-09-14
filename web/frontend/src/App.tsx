@@ -65,7 +65,7 @@ export default function App() {
           <div className="hero-copy">
             <div className="mono-label">AI image generate</div>
             <h1>Describe it. Generate it. Keep iterating.</h1>
-            <p>Create images of your host quickly and easily.</p>
+            <p>Create images from your home quickly and easily.</p>
           </div>
         </section>
       )}
