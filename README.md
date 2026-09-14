@@ -1,6 +1,6 @@
 # 🎨 ImageGenerate
 
-Gere imagens por IA sem sair do lugar: prompt + contexto + referências → imagem + log de custo. 🖼️
+Gere imagens por IA sem sair do lugar: prompt + contexto + referências → imagem + log. 🖼️
 
 ## ✨ O que faz
 
@@ -8,7 +8,7 @@ Gere imagens por IA sem sair do lugar: prompt + contexto + referências → imag
 - ⌨️ **CLI completo** — tudo da GUI via terminal
 - 🧠 **Contexto** — `.md`/`.txt` entram no prompt automaticamente
 - 🖼️ **Memória visual** — imagens de referência guiam a geração
-- 💸 **Log com custo** — `log_image_generate.csv` com custo total no topo
+- 📝 **Log** — `log_image_generate.csv` com totais no topo
 - 🔑 **Cofre de chaves** — uma chave Fernet por provedor, `remember me`
 - ⏱️ **Cronômetro + Cancel** — acompanhe e aborte a geração
 - 📝 **Resumo automático** — 1 frase por imagem (modelo à sua escolha)
