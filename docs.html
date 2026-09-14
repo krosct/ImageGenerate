@@ -42,7 +42,10 @@ html{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid var(--bg)}
 ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
-.no-result{padding:8px 10px;font-size:12.5px;color:var(--muted)}
+/* find-in-page hits */
+.find-count{opacity:.55;font-family:var(--mono);font-size:12px;min-width:48px;text-align:right;flex:none}
+mark.find-hit{background:rgba(252,211,77,.85);color:#111;border-radius:3px;padding:0 1px}
+mark.find-hit.current{background:var(--accent);color:#fff;outline:2px solid var(--accent)}
 .topbar input[type=search]{margin-left:auto;background:var(--panel);border:1px solid var(--border);
   border-radius:999px;color:var(--text);font:inherit;font-size:13px;padding:7px 14px;width:220px;outline:0}
 .topbar input[type=search]:focus{border-color:var(--accent)}
@@ -128,7 +131,8 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <header class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
   <a class="brand" href="#top"><img class="brand-logo" src="logo.png" alt="ImageGenerate logo" /> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
-  <input type="search" id="search" placeholder="Filtrar menu…" aria-label="Filtrar menu" />
+  <input type="search" id="search" placeholder="Buscar na página… (Enter = próximo)" aria-label="Buscar na página" />
+  <span class="find-count" id="findCount" title="Ocorrência atual / total"></span>
   <button class="theme-btn" id="themeBtn" title="Alternar tema">🌙 / ☀️</button>
 </header>
 
@@ -158,7 +162,6 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
   <a href="#flags">Tabela de flags</a>
   <a href="#arquivos">Arquivos e pastas</a>
   <a href="#problemas">Solução de problemas</a>
-  <div class="no-result" id="noResult" style="display:none">Nada encontrado.</div>
 </nav>
 
 <main class="content" id="top">
@@ -400,39 +403,71 @@ document.getElementById('themeBtn').addEventListener('click', () => {
 const sidebar = document.getElementById('sidebar');
 document.getElementById('menuBtn').addEventListener('click', () => sidebar.classList.toggle('open'));
 sidebar.querySelectorAll('a').forEach(a => a.addEventListener('click', () => sidebar.classList.remove('open')));
-// Sidebar search: case-insensitive, matches menu label AND section content.
-// (Filtering only by label is why terms like "cofre" found nothing.)
+// Find-in-page: highlight every match, "current/total" counter, Enter = next.
 const searchInput = document.getElementById('search');
-const noResult = document.getElementById('noResult');
-const sideLinks = [...sidebar.querySelectorAll('a[href^="#"]')];
-const sectionIndex = new Map();
-sideLinks.forEach(a => {
-  const el = document.getElementById(a.getAttribute('href').slice(1));
-  if (!el) return;
-  let text = (a.textContent + ' ' + el.textContent).toLowerCase();
-  const stop = el.tagName === 'H2' ? ['H2'] : ['H2', 'H3'];
-  let sib = el.nextElementSibling;
-  while (sib && !stop.includes(sib.tagName)) {
-    text += ' ' + sib.textContent.toLowerCase();
-    sib = sib.nextElementSibling;
-  }
-  sectionIndex.set(a, text);
-});
-function runSearch() {
-  const q = searchInput.value.trim().toLowerCase();
-  let visible = 0;
-  sideLinks.forEach(a => {
-    const hit = q === '' || (sectionIndex.get(a) || '').includes(q);
-    a.classList.toggle('hide', !hit);
-    if (hit) visible++;
-  });
-  noResult.style.display = visible ? 'none' : 'block';
+const findCount = document.getElementById('findCount');
+const contentEl = document.querySelector('.content');
+let hits = [];
+let currentHit = -1;
+function clearHits() {
+  contentEl.querySelectorAll('mark.find-hit').forEach(m => m.replaceWith(document.createTextNode(m.textContent)));
+  contentEl.normalize();
+  hits = [];
+  currentHit = -1;
+  findCount.textContent = '';
 }
-searchInput.addEventListener('input', runSearch);
+function selectHit(i) {
+  hits.forEach(h => h.classList.remove('current'));
+  currentHit = (i + hits.length) % hits.length;
+  const el = hits[currentHit];
+  el.classList.add('current');
+  findCount.textContent = (currentHit + 1) + '/' + hits.length;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function collectHits(raw) {
+  clearHits();
+  const q = raw.trim();
+  if (q.length < 2) return;
+  const lower = q.toLowerCase();
+  const walker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      if (!n.nodeValue || n.nodeValue.toLowerCase().indexOf(lower) === -1) return NodeFilter.FILTER_REJECT;
+      const p = n.parentElement;
+      if (!p || p.tagName === 'SCRIPT' || p.tagName === 'STYLE' || p.closest('mark.find-hit')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node => {
+    const text = node.nodeValue;
+    const low = text.toLowerCase();
+    const frag = document.createDocumentFragment();
+    let i = 0, idx;
+    while ((idx = low.indexOf(lower, i)) !== -1) {
+      frag.append(text.slice(i, idx));
+      const m = document.createElement('mark');
+      m.className = 'find-hit';
+      m.textContent = text.slice(idx, idx + q.length);
+      frag.append(m);
+      hits.push(m);
+      i = idx + q.length;
+    }
+    frag.append(text.slice(i));
+    node.replaceWith(frag);
+  });
+  if (hits.length) selectHit(0);
+  else findCount.textContent = '0/0';
+}
+searchInput.addEventListener('input', () => collectHits(searchInput.value));
 searchInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const first = sidebar.querySelector('a[href^="#"]:not(.hide)');
-    if (first) { location.hash = first.getAttribute('href'); sidebar.classList.remove('open'); }
+  if (e.key === 'Enter' && hits.length) {
+    e.preventDefault();
+    selectHit(currentHit + 1);
+  } else if (e.key === 'Escape') {
+    searchInput.value = '';
+    clearHits();
+    searchInput.blur();
   }
 });
 // Copy buttons
