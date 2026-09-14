@@ -303,25 +303,30 @@ nav.tabs button.active { background: var(--panel-3); color: var(--text-primary);
 .count-pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  padding: 7px 8px 7px 12px;
-  font-size: 14px;
+  padding: 4px 6px 4px 8px;
+  font-size: 13px;
   font-weight: 650;
   color: var(--text-secondary);
   cursor: text;
 }
 .count-pill input {
-  width: 28px;
+  width: 22px;
+  min-width: 22px;
+  max-width: 22px;
   background: transparent;
   border: 0;
   outline: 0;
   color: var(--text-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   text-align: center;
+  padding: 0;
+  margin: 0;
+}
   padding: 0;
 }
 
