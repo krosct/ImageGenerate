@@ -1,5 +1,7 @@
 # 🎨 ImageGenerate
 
+<p align="center"><img src="logo.png" alt="ImageGenerate" width="120" /></p>
+
 Gere imagens por IA sem sair do lugar: prompt + contexto + referências → imagem + log. 🖼️
 
 ## ✨ O que faz
@@ -29,6 +31,8 @@ python3 image_generate.py --prompt "teste" --dry-run   # grátis, sem API
 python3 image_generate.py --list-log                   # ver histórico
 ```
 
+<p align="center"><img src="logo-titulo.png" alt="Web" width="520" /></p>
+
 ## 🌐 Versão web
 
 ```bash
@@ -36,6 +40,8 @@ pip install -r web/requirements.txt
 cd web/frontend && npm install && npm run build && cd ../..
 python3 web/server.py   # abre http://127.0.0.1:8000
 ```
+
+<p align="center"><img src="logo.png" alt="GUI" width="520" /></p>
 
 Mesmas 3 abas, cronômetro ao vivo, Cancel e log — só local. 🔒
 
