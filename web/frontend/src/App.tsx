@@ -41,10 +41,10 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">◐</span>
+          <img className="brand-logo" src="/logo.png" alt="ImageGenerate logo" />
           <span>
             <div className="brand-name">ImageGenerate</div>
-            <div className="brand-sub">prompt → image studio</div>
+            <div className="brand-sub">Generating your thoughts!</div>
           </span>
         </div>
         <nav className="tabs">
@@ -58,9 +58,10 @@ export default function App() {
 
       {tab === 'generate' && (
         <section className="hero">
-          <div className="mono-label">AI image workspace</div>
+          <img className="hero-featured" src="/logo-titulo.png" alt="ImageGenerate — featured" />
+          <div className="mono-label">AI image generate</div>
           <h1>Describe it. Generate it. Keep iterating.</h1>
-          <p>Prompt up top, variants below — nothing gets overwritten, every run stays in the log.</p>
+          <p>Create images of your host quickly and easily.</p>
         </section>
       )}
 

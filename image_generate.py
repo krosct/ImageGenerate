@@ -1171,10 +1171,34 @@ def run_gui(defaults: dict | None = None) -> None:
     saved = sanitize_gui_config(load_gui_config())
     merged = {**saved, **{k: v for k, v in defaults.items() if v not in (None, "")}}
     root = tk.Tk()
-    root.title("image_generate.py")
+    root.title("ImageGenerate")
     root.geometry("860x720")
 
-    state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None}
+    # Brand logo (logo.png next to this file): window icon + header.
+    # Missing/corrupt file -> plain text header, never blocks startup.
+    state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None,
+                   "logo_img": None}
+    try:
+        _logo_path = Path(__file__).resolve().parent / "logo.png"
+        if _logo_path.is_file():
+            _logo = tk.PhotoImage(file=str(_logo_path))
+            if _logo.width() > 48 or _logo.height() > 48:
+                _logo = _logo.subsample(max(1, _logo.width() // 48 + 1),
+                                        max(1, _logo.height() // 48 + 1))
+            state["logo_img"] = _logo
+            try:
+                root.iconphoto(True, _logo)
+            except tk.TclError:
+                pass
+    except (tk.TclError, OSError):
+        state["logo_img"] = None
+
+    if state["logo_img"] is not None:
+        header = ttk.Frame(root, padding=(8, 8, 8, 0))
+        header.pack(fill=tk.X)
+        ttk.Label(header, image=state["logo_img"]).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(header, text="ImageGenerate",
+                  font=("", 14, "bold")).pack(side=tk.LEFT)
 
     def pick_dir(var: tk.StringVar) -> None:
         chosen = filedialog.askdirectory()
