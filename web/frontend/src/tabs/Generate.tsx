@@ -22,6 +22,7 @@ interface Props {
   onUsePrompt: (text: string) => void
   prompt: string
   setPrompt: (v: string) => void
+  temperature: string
 }
 
 function ratioBox(prop: string): { w: number; h: number } | null {
@@ -44,6 +45,7 @@ export default function Generate(p: Props) {
   const [done, setDone] = useState<{ images: string[]; cost: number } | null>(null)
   const [muted, setMuted] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
+  const [countText, setCountText] = useState('1')
   const audioRef = useRef<AudioContext | null>(null)
 
   // Lazily created on the Generate click (a user gesture), so the
@@ -114,6 +116,28 @@ export default function Generate(p: Props) {
   async function onGenerate() {
     if (!p.prompt.trim()) { setStatus('type a prompt first'); return }
     if (!p.summaryModel.trim()) { setStatus('fill in Summary model first (Model tab)'); return }
+    const tempRaw = p.temperature.trim()
+    if (tempRaw !== '') {
+      const tempNum = Number(tempRaw)
+      if (!Number.isFinite(tempNum) || tempNum < 0 || tempNum > 2) {
+        setStatus('error: invalid temperature (need a number 0-2, or blank)')
+        return
+      }
+    }
+    if (!/^[0-9]+$/.test(countText.trim())) {
+      setStatus('error: invalid count (need a natural number 1-10)')
+      return
+    }
+    const count = parseInt(countText.trim(), 10)
+    if (count < 1 || count > 10) {
+      setStatus('error: invalid count (need a natural number 1-10)')
+      return
+    }
+    if (count > 1 && !window.confirm(
+      `Generate ${count} images with the same prompt and settings?\n\n` +
+      `Each image counts as a separate generation and may incur additional ` +
+      `costs (total ≈ ${count}× the single-image cost).\n\nContinue?`,
+    )) return
     ensureAudio() // unlock sound on user gesture; chime plays when done
     setRunning(true)
     setElapsed(0)
@@ -129,6 +153,8 @@ export default function Generate(p: Props) {
         prop: p.prop,
         resolution: p.resolution,
         output_format: p.outputFormat,
+        temperature: tempRaw === '' ? null : tempRaw,
+        count,
         dry_run: p.dryRun,
         api_key: p.apiKey || null,
         remember_key: p.rememberKey,
@@ -219,6 +245,11 @@ export default function Generate(p: Props) {
           </label>
           <div className="composer-actions">
             <button className="ghost" onClick={onCancel} disabled={!running}>Cancel</button>
+            <label className="count-pill" title="How many images to generate with the same prompt (natural number 1-10). Above 1 asks for confirmation: each image may add costs.">
+              ×<input type="text" value={countText} inputMode="numeric"
+                onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setCountText(e.target.value) }}
+                disabled={running} aria-label="Image count" />
+            </label>
             <button className="primary" onClick={onGenerate} disabled={running}>
               {running ? 'Generating…' : 'Generate'}
             </button>

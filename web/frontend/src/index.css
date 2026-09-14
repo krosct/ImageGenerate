@@ -110,6 +110,24 @@ nav.tabs button {
 nav.tabs button:hover { color: var(--text-primary); }
 nav.tabs button.active { background: var(--panel-3); color: var(--text-primary); }
 
+/* Help (?) button: same pill language as the tabs */
+.help-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-weight: 700;
+  font-size: 15px;
+  text-decoration: none;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.help-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
 /* ---- hero ---- */
 /* Logo as a full-screen watermark behind the site: screen-sized,
    rotated 30deg, very low opacity, edges melted into the canvas. */
@@ -280,6 +298,37 @@ nav.tabs button.active { background: var(--panel-3); color: var(--text-primary);
 .pill-check input { accent-color: #fafafa; }
 
 .composer-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* Count pill next to Generate (natural numbers only) */
+.count-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 4px 6px 4px 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  cursor: text;
+}
+.count-pill input {
+  width: 22px;
+  min-width: 22px;
+  max-width: 22px;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  padding: 0;
+  margin: 0;
+}
+  padding: 0;
+}
 
 /* Buttons: white primary (Superdesign submit), quiet ghost */
 button.primary {

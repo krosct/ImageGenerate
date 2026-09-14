@@ -31,6 +31,7 @@ import datetime as dt
 import hashlib
 import http.client
 import json
+import math
 import mimetypes
 import os
 import re
@@ -128,6 +129,41 @@ def normalize_provider(name: str) -> str:
     if slug not in PROVIDERS:
         raise ValueError(f"unknown provider: {slug!r} (known: {sorted(PROVIDERS)})")
     return slug
+
+
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
+MIN_COUNT = 1
+MAX_COUNT = 10  # OpenRouter images API upper bound for n
+
+
+def parse_temperature(raw: str | float | None) -> float | None:
+    """Parse optional temperature (blank -> None). Raises ValueError."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(
+            f"invalid temperature: {raw!r} (need a number {MIN_TEMPERATURE:g}-{MAX_TEMPERATURE:g})"
+        ) from None
+    if not math.isfinite(value) or not MIN_TEMPERATURE <= value <= MAX_TEMPERATURE:
+        raise ValueError(
+            f"invalid temperature: {raw!r} (need a number {MIN_TEMPERATURE:g}-{MAX_TEMPERATURE:g})"
+        )
+    return value
+
+
+def parse_count(raw: str | int | None) -> int:
+    """Parse image count (natural number 1-10). Raises ValueError."""
+    text = str(raw).strip() if raw is not None else ""
+    if not re.fullmatch(r"[0-9]+", text):
+        raise ValueError(f"invalid count: {raw!r} (need a natural number {MIN_COUNT}-{MAX_COUNT})")
+    value = int(text)
+    if not MIN_COUNT <= value <= MAX_COUNT:
+        raise ValueError(f"invalid count: {raw!r} (need a natural number {MIN_COUNT}-{MAX_COUNT})")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +287,7 @@ CONFIG_KEYS = (
     "prop",
     "resolution",
     "output_format",
+    "temperature",
     "dry_run",
 )
 
@@ -306,6 +343,11 @@ def sanitize_gui_config(data: dict) -> dict:
     clean["resolution"] = res if res in RESOLUTIONS else "1K"
     fmt = str(data.get("output_format", "png"))
     clean["output_format"] = fmt if fmt in OUTPUT_FORMATS else "png"
+    try:
+        parsed = parse_temperature(data.get("temperature", ""))
+        clean["temperature"] = "" if parsed is None else str(parsed)
+    except ValueError:
+        clean["temperature"] = ""
     clean["dry_run"] = bool(data.get("dry_run", False))
     return clean
 
@@ -720,6 +762,7 @@ def request_openrouter(
     output_format: str,
     seed: int | None,
     count: int,
+    temperature: float | None,
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
@@ -736,6 +779,10 @@ def request_openrouter(
         body["input_references"] = references
     if seed is not None:
         body["seed"] = seed
+    if temperature is not None:
+        # Undocumented for the images endpoint (model-dependent): sent only
+        # when the user explicitly sets it; empty means "provider default".
+        body["temperature"] = temperature
     start = time.perf_counter()
     start_ts = time.time()
     status, raw = _post_json(API_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
@@ -758,6 +805,7 @@ def request_gemini(
     output_format: str,
     seed: int | None,
     count: int,
+    temperature: float | None,
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
@@ -884,6 +932,7 @@ def run_generation(
     dry_run: bool = False,
     summary_model: str = "",
     provider: str = DEFAULT_PROVIDER,
+    temperature: float | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
     """Run one generation request and update the CSV log. Returns result dict.
@@ -954,6 +1003,7 @@ def run_generation(
                     output_format=output_format,
                     seed=seed,
                     count=count,
+                    temperature=temperature,
                     timeout_s=timeout_s,
                     cancel_event=cancel_event,
                 )
@@ -1090,6 +1140,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-format", default="png", choices=OUTPUT_FORMATS)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--count", "--n", dest="count", type=int, default=1)
+    parser.add_argument("--temperature", default="",
+                        help="Sampling temperature 0-2 (empty = provider default; "
+                             "undocumented for images, model-dependent).")
     parser.add_argument("--api-key", default="",
                         help="API key for the provider (else env var, else remembered vault).")
     parser.add_argument("--remember-key", action="store_true",
@@ -1151,6 +1204,16 @@ def main_cli(args: argparse.Namespace) -> int:
     if not prompt.strip():
         print("error: provide --prompt or --prompt-file (or use --gui)", file=sys.stderr)
         return 2
+    try:
+        count = parse_count(args.count)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        temperature = parse_temperature(args.temperature)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     model = args.model or PROVIDERS[provider]["default_model"]
     print(f"[{started}] requesting provider={provider} model={model} "
@@ -1176,12 +1239,13 @@ def main_cli(args: argparse.Namespace) -> int:
             resolution=args.resolution,
             output_format=args.output_format,
             seed=args.seed,
-            count=args.count,
+            count=count,
             api_key=api_key,
             timeout_s=args.timeout,
             dry_run=args.dry_run,
             summary_model=args.summary_model,
             provider=provider,
+            temperature=temperature,
             cancel_event=cancel_event,
         )
     except GenerationCancelled:
@@ -1243,6 +1307,23 @@ def run_gui(defaults: dict | None = None) -> None:
         ttk.Label(header, image=state["logo_img"]).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(header, text="ImageGenerate",
                   font=("", 14, "bold")).pack(side=tk.LEFT)
+    else:
+        header = ttk.Frame(root, padding=(8, 8, 8, 0))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="ImageGenerate",
+                  font=("", 14, "bold")).pack(side=tk.LEFT)
+
+    def open_docs() -> None:
+        """Open docs.html (repo root) in the default browser."""
+        import webbrowser
+
+        docs = Path(__file__).resolve().parent / "docs.html"
+        if docs.is_file():
+            webbrowser.open(docs.as_uri())
+        else:
+            messagebox.showwarning("Docs", f"docs.html not found:\n{docs}")
+
+    ttk.Button(header, text="?", width=3, command=open_docs).pack(side=tk.RIGHT)
 
     def pick_dir(var: tk.StringVar) -> None:
         chosen = filedialog.askdirectory()
@@ -1274,7 +1355,9 @@ def run_gui(defaults: dict | None = None) -> None:
     prop_var = tk.StringVar(value=str(merged.get("prop", "1:1")))
     res_var = tk.StringVar(value=str(merged.get("resolution", "1K")))
     fmt_var = tk.StringVar(value=str(merged.get("output_format", "png")))
+    temp_var = tk.StringVar(value=str(merged.get("temperature", "")))
     seed_var = tk.StringVar(value="")
+    count_var = tk.StringVar(value="1")
     _initial_key, _initial_source = resolve_api_key(provider_var.get())
     key_var = tk.StringVar(value=_initial_key or "")
     remember_var = tk.BooleanVar(value=_initial_source == "vault")
@@ -1349,6 +1432,13 @@ def run_gui(defaults: dict | None = None) -> None:
     forget_btn = ttk.Button(key_row, text="Forget",
                             command=lambda: on_forget_key())
     forget_btn.pack(side=tk.LEFT)
+    ttk.Label(tab_model, text="Temperature:").grid(row=4, column=0, sticky=tk.W, padx=4, pady=2)
+    temp_entry = ttk.Entry(tab_model, textvariable=temp_var, width=60)
+    temp_entry.grid(row=4, column=1, sticky=tk.EW, padx=4)
+    attach_help(temp_entry,
+                "Sampling temperature 0-2 (blank = provider default). "
+                "Accepts numbers only; anything else blocks generation. "
+                "Note: undocumented for the images API, support is model-dependent.")
     tab_model.columnconfigure(1, weight=1)
 
     # ---- Dir tab: output / context / memory dirs ----
@@ -1485,6 +1575,12 @@ def run_gui(defaults: dict | None = None) -> None:
     bar.pack(fill=tk.X)
     gen_btn = ttk.Button(bar, text="Generate")
     gen_btn.pack(side=tk.LEFT)
+    ttk.Label(bar, text="×").pack(side=tk.LEFT, padx=(4, 0))
+    count_entry = ttk.Entry(bar, textvariable=count_var, width=4,
+                            validate="key",
+                            validatecommand=(root.register(
+                                lambda v: v == "" or v.isdigit()), "%P"))
+    count_entry.pack(side=tk.LEFT)
     cancel_btn = ttk.Button(bar, text="Cancel", state=tk.DISABLED)
     cancel_btn.pack(side=tk.LEFT, padx=4)
     clock_var = tk.StringVar(value="elapsed: 0.0s")
@@ -1524,6 +1620,9 @@ def run_gui(defaults: dict | None = None) -> None:
     attach_help(dry_check,
                 "Test run without spending anything: writes a local placeholder image "
                 "instead of calling the paid API.")
+    attach_help(count_entry,
+                "How many images to generate with the same prompt (natural number 1-10). "
+                "Above 1 asks for confirmation: each image may add costs.")
     attach_help(clock_label,
                 "Time from sending the request until the image arrives.")
     attach_help(status_label,
@@ -1711,6 +1810,24 @@ def run_gui(defaults: dict | None = None) -> None:
         seed_raw = seed_var.get().strip()
         seed = int(seed_raw) if seed_raw.lstrip("-").isdigit() else None
         try:
+            temperature = parse_temperature(temp_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid temperature", str(exc))
+            return
+        try:
+            count = parse_count(count_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid count", str(exc))
+            return
+        if count > 1 and not messagebox.askyesno(
+            "Confirm multiple generations",
+            f"Generate {count} images with the same prompt and settings?\n\n"
+            f"Each image counts as a separate generation and may incur "
+            f"additional costs (total \u2248 {count}\u00d7 the single-image cost).\n\n"
+            "Continue?",
+        ):
+            return
+        try:
             current_provider = normalize_provider(provider_var.get())
         except ValueError as exc:
             messagebox.showerror("Invalid provider", str(exc))
@@ -1732,11 +1849,12 @@ def run_gui(defaults: dict | None = None) -> None:
             "resolution": res_var.get().strip() or "1K",
             "output_format": fmt_var.get().strip() or "png",
             "seed": seed,
-            "count": 1,
+            "count": count,
             "api_key": api_key,
             "dry_run": bool(dry_var.get()),
             "summary_model": summary_model,
             "provider": current_provider,
+            "temperature": temperature,
             "cancel_event": threading.Event(),
         }
         state["running"] = True
@@ -1764,6 +1882,7 @@ def run_gui(defaults: dict | None = None) -> None:
                 "prop": prop_var.get().strip(),
                 "resolution": res_var.get().strip(),
                 "output_format": fmt_var.get().strip(),
+                "temperature": temp_var.get().strip(),
                 "dry_run": bool(dry_var.get()),
             })
         except OSError:

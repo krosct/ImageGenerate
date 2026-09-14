@@ -23,6 +23,7 @@ export interface AppConfig {
   prop: string
   resolution: string
   output_format: string
+  temperature: string
   dry_run: boolean
 }
 

@@ -52,6 +52,7 @@ class GenerateRequest(BaseModel):
     output_format: str = "png"
     seed: int | None = None
     count: int = 1
+    temperature: str | float | None = None
     dry_run: bool = False
     api_key: str | None = None
     remember_key: bool = False
@@ -67,6 +68,7 @@ class ConfigUpdate(BaseModel):
     prop: str = "1:1"
     resolution: str = "1K"
     output_format: str = "png"
+    temperature: str = ""
     dry_run: bool = False
 
 
@@ -130,6 +132,14 @@ def api_generate(req: GenerateRequest) -> dict:
         raise HTTPException(400, "prompt is empty")
     if not req.summary_model.strip():
         raise HTTPException(400, "summary_model is required")
+    try:
+        count = ig.parse_count(req.count)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        temperature = ig.parse_temperature("" if req.temperature is None else str(req.temperature))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     api_key, source = ig.resolve_api_key(provider, req.api_key or None)
     if req.remember_key and (req.api_key or "").strip():
         try:
@@ -150,10 +160,11 @@ def api_generate(req: GenerateRequest) -> dict:
         "resolution": req.resolution,
         "output_format": req.output_format,
         "seed": req.seed,
-        "count": req.count,
+        "count": count,
         "api_key": api_key,
         "dry_run": req.dry_run,
         "provider": provider,
+        "temperature": temperature,
         "cancel_event": cancel_event,
     }
     with JOBS_LOCK:
@@ -338,6 +349,20 @@ def api_forget_key(provider: str) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"forgotten": ig.forget_remembered_key(pid)}
+
+
+# ---------------------------------------------------------------------------
+# Docs page (repo-root docs.html, single file, no dependencies)
+# ---------------------------------------------------------------------------
+
+DOCS = Path(__file__).resolve().parent.parent / "docs.html"
+
+
+@app.get("/help", include_in_schema=False)
+def api_docs():
+    if not DOCS.is_file():
+        raise HTTPException(404, "docs.html not found (see repo root)")
+    return FileResponse(DOCS, media_type="text/html")
 
 
 # ---------------------------------------------------------------------------

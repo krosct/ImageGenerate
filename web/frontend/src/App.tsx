@@ -7,7 +7,7 @@ import Dir from './tabs/Dir'
 const DEFAULTS: AppConfig = {
   output_dir: '', context_dir: '', memory_dir: '',
   provider: 'openrouter', model: '', summary_model: '',
-  prop: '1:1', resolution: '1K', output_format: 'png', dry_run: false,
+  prop: '1:1', resolution: '1K', output_format: 'png', temperature: '', dry_run: false,
 }
 
 export default function App() {
@@ -51,13 +51,17 @@ export default function App() {
             <div className="brand-sub">Generating your thoughts!</div>
           </span>
         </div>
-        <nav className="tabs">
-          {(['generate', 'model', 'dir'] as const).map((t) => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-              {t[0].toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </nav>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <nav className="tabs">
+            {(['generate', 'model', 'dir'] as const).map((t) => (
+              <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+                {t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </nav>
+          <a className="help-btn" href="/help" target="_blank" rel="noreferrer"
+            title="Open docs (docs.html)">?</a>
+        </div>
       </header>
 
       {tab === 'generate' && (
@@ -85,6 +89,7 @@ export default function App() {
           outputFormats={meta?.output_formats ?? ['png']}
           apiKey={apiKey} rememberKey={rememberKey}
           onUsePrompt={usePrompt} prompt={prompt} setPrompt={setPrompt}
+          temperature={cfg.temperature}
         />
       )}
       {tab === 'model' && (
@@ -92,6 +97,7 @@ export default function App() {
           provider={cfg.provider} setProvider={(v) => set('provider', v)}
           model={cfg.model} setModel={(v) => set('model', v)}
           summaryModel={cfg.summary_model} setSummaryModel={(v) => set('summary_model', v)}
+          temperature={cfg.temperature} setTemperature={(v) => set('temperature', v)}
           apiKey={apiKey} setApiKey={setApiKey}
           rememberKey={rememberKey} setRememberKey={setRememberKey}
           providers={meta?.providers ?? []} status={setNotice}
