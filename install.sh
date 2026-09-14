@@ -32,6 +32,9 @@ Keywords=ai;image;generate;openrouter;
 EOF
 
 chmod 644 "$APP_DIR/image-generate.desktop"
+# Nautilus only launches .desktop files with the exec bit ("trusted").
+chmod +x "$APP_DIR/image-generate.desktop"
+command -v gio >/dev/null && gio set "$APP_DIR/image-generate.desktop" metadata::trusted true || true
 command -v desktop-file-validate >/dev/null && desktop-file-validate "$APP_DIR/image-generate.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$APP_DIR" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" || true
