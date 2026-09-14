@@ -59,9 +59,11 @@ export default function App() {
       {tab === 'generate' && (
         <section className="hero">
           <img className="hero-featured" src="/logo-titulo.png" alt="ImageGenerate — featured" />
-          <div className="mono-label">AI image generate</div>
-          <h1>Describe it. Generate it. Keep iterating.</h1>
-          <p>Create images of your host quickly and easily.</p>
+          <div className="hero-copy">
+            <div className="mono-label">AI image generate</div>
+            <h1>Describe it. Generate it. Keep iterating.</h1>
+            <p>Create images of your host quickly and easily.</p>
+          </div>
         </section>
       )}
 

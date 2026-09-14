@@ -186,7 +186,7 @@ export default function Generate(p: Props) {
           {!log && <div className="hint">loading…</div>}
           {log && (
             <>
-              <div className="hint">total: {log.total_ops} ops / ${log.total_cost.toFixed(6)} · click a row to reuse its prompt</div>
+              <div className="hint">total: {log.total_ops} ops / ${log.total_cost.toFixed(6)}</div>
               <div className="logwrap">
                 <table className="log">
                   <thead><tr>{log.fields.map((f) => <th key={f}>{f.replace(/_/g, ' ')}</th>)}</tr></thead>

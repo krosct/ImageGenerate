@@ -1170,8 +1170,14 @@ def run_gui(defaults: dict | None = None) -> None:
     # Precedence: hard defaults < config.json < explicit caller defaults.
     saved = sanitize_gui_config(load_gui_config())
     merged = {**saved, **{k: v for k, v in defaults.items() if v not in (None, "")}}
-    root = tk.Tk()
+    # WM_CLASS="ImageGenerate" so Ubuntu/GNOME dock shows our name
+    # instead of the default "tk" gear entry.
+    root = tk.Tk(className="ImageGenerate")
     root.title("ImageGenerate")
+    try:
+        root.iconname("ImageGenerate")
+    except tk.TclError:
+        pass
     root.geometry("860x720")
 
     # Brand logo (logo.png next to this file): window icon + header.

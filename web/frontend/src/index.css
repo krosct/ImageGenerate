@@ -111,15 +111,30 @@ nav.tabs button:hover { color: var(--text-primary); }
 nav.tabs button.active { background: var(--panel-3); color: var(--text-primary); }
 
 /* ---- hero ---- */
-.hero { text-align: center; padding: 26px 0 18px; }
+.hero {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 26px 0 18px;
+  text-align: left;
+}
 .hero-featured {
   display: block;
-  max-width: 420px;
-  width: 72%;
+  flex: 0 0 300px;
+  width: 300px;
+  max-width: 32vw;
   height: auto;
-  margin: 0 auto 16px;
-  border-radius: 18px;
-  border: 1px solid var(--border);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  /* Soft fading so the edges melt into the black canvas. */
+  -webkit-mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, #000 58%, transparent 100%);
+  mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, #000 58%, transparent 100%);
+}
+.hero-copy { min-width: 0; flex: 1; }
+@media (max-width: 720px) {
+  .hero { flex-direction: column; text-align: center; }
+  .hero-featured { width: 62%; max-width: 300px; }
 }
 .hero h1 {
   margin: 0;
