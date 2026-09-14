@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=ImageGenerate
+GenericName=AI Image Generator
+Comment=Generate images via AI (prompt + context + references)
+Exec=python3 /home/ph/Documentos/ImageGenerate/image_generate.py --gui
+Icon=/home/ph/Documentos/ImageGenerate/logo.png
+Terminal=false
+Categories=Graphics;2DGraphics;
+StartupNotify=true
+StartupWMClass=ImageGenerate
+Keywords=ai;image;generate;openrouter;
