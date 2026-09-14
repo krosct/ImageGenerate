@@ -39,8 +39,8 @@ export default function Model(p: Props) {
 
   return (
     <div className="card">
-      <label>Provider</label>
-      <select value={p.provider} onChange={(e) => {
+      <label className="field-label">Provider</label>
+      <select className="full" value={p.provider} onChange={(e) => {
         const next = e.target.value
         p.setProvider(next)
         const info = p.providers.find((x) => x.id === next)
@@ -49,22 +49,23 @@ export default function Model(p: Props) {
         {p.providers.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
       </select>
 
-      <label>Model</label>
+      <label className="field-label">Model</label>
       <input type="text" value={p.model} onChange={(e) => p.setModel(e.target.value)}
         placeholder={p.providers.find((x) => x.id === p.provider)?.default_model} />
 
-      <label title="Chat model that writes the 1-sentence log summary. Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. Required: generation will not start with this field empty.">
+      <label className="field-label" title="Chat model that writes the 1-sentence log summary. Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. Required: generation will not start with this field empty.">
         Summary model ⓘ</label>
       <input type="text" value={p.summaryModel} onChange={(e) => p.setSummaryModel(e.target.value)}
         placeholder="openrouter/free" />
 
-      <label>API key {current?.configured ? `(configured via ${current.source})` : '(not configured)'}</label>
+      <label className="field-label">API key {current?.configured ? `(configured via ${current.source})` : '(not configured)'}</label>
       <div className="row">
         <div style={{ flex: 3 }}>
           <input type="password" value={p.apiKey} onChange={(e) => p.setApiKey(e.target.value)} />
         </div>
         <div>
-          <label title={`Encrypt and save this key in ${current?.vault_dir ?? ''}/<provider>_api_key.enc so you don't type it again.`}>
+          <label className={`pill-check${p.rememberKey ? ' on' : ''}`}
+            title={`Encrypt and save this key in ${current?.vault_dir ?? ''}/<provider>_api_key.enc so you don't type it again.`}>
             <input type="checkbox" checked={p.rememberKey}
               onChange={(e) => p.setRememberKey(e.target.checked)} /> remember me</label>
         </div>

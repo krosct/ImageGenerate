@@ -39,15 +39,32 @@ export default function App() {
 
   return (
     <div className="app">
-      <h2>🎨 ImageGenerate</h2>
-      {notice && <div className="hint">{notice}</div>}
-      <nav className="tabs">
-        {(['generate', 'model', 'dir'] as const).map((t) => (
-          <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </nav>
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">◐</span>
+          <span>
+            <div className="brand-name">ImageGenerate</div>
+            <div className="brand-sub">prompt → image studio</div>
+          </span>
+        </div>
+        <nav className="tabs">
+          {(['generate', 'model', 'dir'] as const).map((t) => (
+            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+              {t[0].toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {tab === 'generate' && (
+        <section className="hero">
+          <div className="mono-label">AI image workspace</div>
+          <h1>Describe it. Generate it. Keep iterating.</h1>
+          <p>Prompt up top, variants below — nothing gets overwritten, every run stays in the log.</p>
+        </section>
+      )}
+
+      {notice && <div className="notice">{notice}</div>}
 
       {tab === 'generate' && (
         <Generate

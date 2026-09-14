@@ -20,7 +20,7 @@ export default function Dir(p: Props) {
     <div className="card">
       {fields.map(([label, value, setValue, hint]) => (
         <div key={label}>
-          <label title={hint}>{label} ⓘ</label>
+          <label className="field-label" title={hint}>{label} ⓘ</label>
           <input type="text" value={value} onChange={(e) => setValue(e.target.value)} />
         </div>
       ))}

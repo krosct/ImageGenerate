@@ -105,64 +105,84 @@ export default function Generate(p: Props) {
   }
 
   const box = ratioBox(p.prop)
+  const statusClass = status.startsWith('error') || status.startsWith('log error')
+    ? 'status is-error'
+    : status.startsWith('saved')
+      ? 'status is-done'
+      : 'status'
 
   return (
     <div>
-      <div className="card">
-        <label>Prompt</label>
-        <textarea value={p.prompt} onChange={(e) => p.setPrompt(e.target.value)} />
-        <div className="row">
-          <div>
-            <label title="Aspect ratio appended to the prompt">Aspect (prop)
-              <span className="ratio-tip">ⓘ
+      <div className="composer">
+        <textarea
+          value={p.prompt}
+          onChange={(e) => p.setPrompt(e.target.value)}
+          placeholder="Describe the image… e.g. a red panda astronaut, cinematic light, ultra detailed"
+        />
+        <div className="composer-toolbar">
+          <label className="pill-select">
+            <span title="Aspect ratio appended to the prompt">Ratio
+              <span className="ratio-tip"> ⓘ
                 {box && (
                   <span className="ratio-preview">
                     <svg width="216" height="126">
                       <rect x={(216 - box.w) / 2} y={(126 - box.h) / 2} width={box.w} height={box.h}
-                        fill="none" stroke="red" strokeWidth="3" />
+                        fill="none" stroke="#111" strokeWidth="3" />
                     </svg>
                     <div style={{ color: '#000', fontSize: 12 }}>{p.prop}</div>
                   </span>
                 )}
               </span>
-            </label>
+            </span>
             <select value={p.prop} onChange={(e) => p.setProp(e.target.value)} disabled={running}>
               {p.aspectRatios.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
-          </div>
-          <div>
-            <label>Resolution</label>
+          </label>
+          <label className="pill-select">
+            <span>Res</span>
             <select value={p.resolution} onChange={(e) => p.setResolution(e.target.value)} disabled={running}>
               {p.resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
-          </div>
-          <div>
-            <label>Format</label>
+          </label>
+          <label className="pill-select">
+            <span>Fmt</span>
             <select value={p.outputFormat} onChange={(e) => p.setOutputFormat(e.target.value)} disabled={running}>
               {p.outputFormats.map((f) => <option key={f} value={f}>{f}</option>)}
             </select>
+          </label>
+          <label className={`pill-check${p.dryRun ? ' on' : ''}`}
+            title="Test run without spending anything: writes a local placeholder instead of calling the paid API.">
+            <input type="checkbox" checked={p.dryRun} onChange={(e) => p.setDryRun(e.target.checked)} disabled={running} /> dry-run
+          </label>
+          <div className="composer-actions">
+            <button className="ghost" onClick={onCancel} disabled={!running}>Cancel</button>
+            <button className="primary" onClick={onGenerate} disabled={running}>
+              {running ? 'Generating…' : 'Generate'}
+            </button>
           </div>
-          <div><label title="Test run without spending anything: writes a local placeholder instead of calling the paid API.">
-            <input type="checkbox" checked={p.dryRun} onChange={(e) => p.setDryRun(e.target.checked)} disabled={running} /> dry-run</label></div>
         </div>
-        <div style={{ marginTop: 12 }}>
-          <button className="primary" onClick={onGenerate} disabled={running}>Generate</button>
-          <button className="ghost" onClick={onCancel} disabled={!running} style={{ marginLeft: 8 }}>Cancel</button>
-          <span className="clock" title="Time from sending the request until the image arrives.">
-            elapsed: {elapsed.toFixed(1)}s
+        <div className="run-strip">
+          <span className="elapsed" title="Time from sending the request until the image arrives.">
+            {elapsed.toFixed(1)}s
           </span>
           {running && <span className="spinner"><div /></span>}
-          <span className="status" title="Current state: idle, generating, done, cancelled or error.">{status}</span>
-          <button className="ghost" onClick={() => { setLogOpen(!logOpen); if (!logOpen) void refreshLog() }} style={{ float: 'right' }}>
-            {logOpen ? 'Hide log ▲' : 'Show log ▼'}
-          </button>
+          <span className={statusClass} title="Current state: idle, generating, done, cancelled or error.">{status}</span>
+          <span style={{ marginLeft: 'auto' }}>
+            <button className="ghost" onClick={() => { setLogOpen(!logOpen); if (!logOpen) void refreshLog() }}>
+              {logOpen ? 'Hide log ▲' : 'Show log ▼'}
+            </button>
+          </span>
         </div>
       </div>
 
       {logOpen && (
         <div className="card">
-          <button className="ghost" onClick={refreshLog} style={{ float: 'right' }}>Refresh log</button>
-          <h3>log_image_generate.csv</h3>
+          <div className="log-head">
+            <h3>History</h3>
+            <span className="hint">log_image_generate.csv</span>
+            <span className="hint">click a row to reuse its prompt</span>
+            <button className="ghost" onClick={refreshLog}>Refresh log</button>
+          </div>
           {!log && <div className="hint">loading…</div>}
           {log && (
             <>
@@ -188,18 +208,21 @@ export default function Generate(p: Props) {
       {done && (
         <div className="modal-bg" onClick={() => setDone(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Imagem gerada com sucesso!</h3>
+            <h3>Done — {done.images.length} image{done.images.length === 1 ? '' : 's'}</h3>
+            <div className="hint">Variants branch below, nothing overwritten · ${done.cost.toFixed(6)}</div>
+            <div className="result-grid">
             {done.images.map((img) => {
               const name = img.split('/').pop() ?? img
               return (
-                <div key={img}>
+                <div key={img} className="result-card">
                   <img src={api.imageUrl(p.outputDir, name)} alt={name} />
                   <div><a href={api.imageUrl(p.outputDir, name)} target="_blank" rel="noreferrer">
-                    <button className="ghost">Abrir</button>
+                    <button className="ghost">Open full size</button>
                   </a> <span className="hint">{name}</span></div>
                 </div>
               )
             })}
+            </div>
             <div style={{ marginTop: 12, textAlign: 'right' }}>
               <button className="primary" onClick={() => setDone(null)}>OK</button>
             </div>
