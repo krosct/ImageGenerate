@@ -43,7 +43,7 @@ html{scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
 ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid var(--bg)}
 ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 /* find-in-page hits */
-.find-count{opacity:.55;font-family:var(--mono);font-size:12px;min-width:48px;text-align:right;flex:none}
+.find-count{opacity:.35;font-family:var(--mono);font-size:12px;min-width:48px;text-align:right;flex:none}
 mark.find-hit{background:rgba(252,211,77,.85);color:#111;border-radius:3px;padding:0 1px}
 mark.find-hit.current{background:var(--accent);color:#fff;outline:2px solid var(--accent)}
 .topbar input[type=search]{margin-left:auto;background:var(--panel);border:1px solid var(--border);
@@ -131,7 +131,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <header class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
   <a class="brand" href="#top"><img class="brand-logo" src="logo.png" alt="ImageGenerate logo" /> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
-  <input type="search" id="search" placeholder="Buscar na página… (Enter = próximo)" aria-label="Buscar na página" />
+  <input type="search" id="search" placeholder="Buscar na página…" aria-label="Buscar na página" />
   <span class="find-count" id="findCount" title="Ocorrência atual / total"></span>
   <button class="theme-btn" id="themeBtn" title="Alternar tema">🌙 / ☀️</button>
 </header>
@@ -142,6 +142,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
   <a href="#visao-geral">Visão geral</a>
   <a href="#instalacao">Instalação</a>
   <a href="#inicio-rapido">Início rápido</a>
+  <a href="#conta-openrouter">Conta OpenRouter</a>
   <h4>Interfaces</h4>
   <a href="#cli">CLI (terminal)</a>
   <a href="#gui">GUI (desktop)</a>
@@ -204,9 +205,33 @@ python3 image_generate.py --gui
 # Web (em outro terminal, após o build do frontend)
 python3 web/server.py   # http://127.0.0.1:8000
 
-# Com chave (OpenRouter)
+# Com chave (OpenRouter — veja “Conta OpenRouter” abaixo)
 export OPENROUTER_API_KEY="sk-or-..."
 python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1K</code></pre>
+
+<h2 id="conta-openrouter">Conta OpenRouter</h2>
+<p>Tutorial básico para sair do <code class="inline">--dry-run</code> e gerar de verdade. São 3 passos: <strong>conta → chave → modelo</strong>.</p>
+<h3>1. Criar a conta</h3>
+<ol>
+<li>Abra <a href="https://openrouter.ai" target="_blank" rel="noreferrer">openrouter.ai</a> e clique em <strong>Sign Up / Sign In</strong> (vale conta Google ou e-mail).</li>
+<li>Adicione <strong>créditos</strong> no dashboard (Billing) — os modelos pagos descontam daí; modelos marcados <em>free</em> não custam nada.</li>
+</ol>
+<div class="callout"><span class="tag">Por quê OpenRouter?</span>Um gateway único para centenas de modelos com a mesma API. O app já manda os headers que ele recomenda (<code class="inline">HTTP-Referer</code>, <code class="inline">X-Title</code>) — você só entra com a chave.</div>
+<h3>2. Criar a API key</h3>
+<ol>
+<li>No dashboard, abra <strong>Keys</strong> e clique em <strong>Create</strong>.</li>
+<li>Dê um nome (ex.: <code class="inline">ImageGenerate</code>) e, se quiser, um <strong>limite de gasto</strong> — bom para não estourar crédito sem querer.</li>
+<li><strong>Copie na hora:</strong> o valor completo (<code class="inline">sk-or-…</code>) aparece uma única vez e não pode ser recuperado depois. Perdeu? Apague e crie outra.</li>
+<li>Cole no app — <strong>aba Model</strong> (marque <em>remember me</em> para guardar no cofre) ou via <code class="inline">export OPENROUTER_API_KEY="sk-or-…"</code> / <code class="inline">--api-key</code>.</li>
+</ol>
+<h3>3. Escolher o modelo</h3>
+<ol>
+<li>Abra o catálogo em <a href="https://openrouter.ai/models" target="_blank" rel="noreferrer">openrouter.ai/models</a> e filtre por <strong>image</strong> (ou busque pelo nome).</li>
+<li>Copie o <strong>slug</strong> — o identificador no formato <code class="inline">autor/nome</code>, ex.: <code class="inline">meta/muse-image</code> (é o padrão do app).</li>
+<li>Cole no campo <strong>Model</strong> (aba Model) ou passe <code class="inline">--model autor/nome</code>. Confira preço por imagem e tamanho de contexto na página do modelo.</li>
+<li>Para o <strong>Summary model</strong> (só escreve 1 frase no log), escolha um modelo <strong>grátis/pequeno</strong> — ele não afeta a qualidade da imagem.</li>
+</ol>
+<div class="callout tip"><span class="tag">Teste barato</span>Valide chave + modelo com <code class="inline">--dry-run</code> primeiro (não gasta nada) e só depois rode a geração real.</div>
 
 <h2 id="cli">CLI (terminal)</h2>
 <p>A forma completa e scriptável. <strong>Tudo</strong> que a GUI/Web fazem passa por aqui.</p>
@@ -366,6 +391,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <a href="#visao-geral">Visão geral</a>
 <a href="#instalacao">Instalação</a>
 <a href="#inicio-rapido">Início rápido</a>
+<a href="#conta-openrouter">OpenRouter</a>
 <a href="#cli">CLI</a>
 <a href="#gui">GUI</a>
 <a href="#web">Web</a>
