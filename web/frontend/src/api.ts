@@ -74,6 +74,11 @@ export const api = {
     req<{ cancelled: boolean }>(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   imageUrl: (outputDir: string, name: string) =>
     `/api/images?output_dir=${encodeURIComponent(outputDir)}&name=${encodeURIComponent(name)}`,
+  browse: (path: string) =>
+    req<{ path: string; parent: string; home: string; dirs: string[] }>(
+      `/api/browse?path=${encodeURIComponent(path)}`),
+  mkdir: (path: string, name: string) =>
+    req<{ path: string }>('/api/browse/mkdir', { method: 'POST', body: JSON.stringify({ path, name }) }),
 }
 
 export function listenJob(jobId: string, onEvent: (ev: JobEvent) => void): () => void {

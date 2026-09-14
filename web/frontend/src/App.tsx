@@ -38,16 +38,39 @@ export default function App() {
   }
 
   return (
+    <>
+    <div className="page-bg" aria-hidden="true">
+      <img src="/logo.png" alt="" />
+    </div>
     <div className="app">
-      <h2>🎨 ImageGenerate</h2>
-      {notice && <div className="hint">{notice}</div>}
-      <nav className="tabs">
-        {(['generate', 'model', 'dir'] as const).map((t) => (
-          <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </nav>
+      <header className="topbar">
+        <div className="brand">
+          <img className="brand-logo" src="/logo.png" alt="ImageGenerate logo" />
+          <span>
+            <div className="brand-name">ImageGenerate</div>
+            <div className="brand-sub">Generating your thoughts!</div>
+          </span>
+        </div>
+        <nav className="tabs">
+          {(['generate', 'model', 'dir'] as const).map((t) => (
+            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+              {t[0].toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {tab === 'generate' && (
+        <section className="hero">
+          <div className="hero-copy">
+            <div className="mono-label">AI image generate</div>
+            <h1>Describe it. Generate it. Keep iterating.</h1>
+            <p>Create images from your home quickly and easily.</p>
+          </div>
+        </section>
+      )}
+
+      {notice && <div className="notice">{notice}</div>}
 
       {tab === 'generate' && (
         <Generate
@@ -82,5 +105,6 @@ export default function App() {
         />
       )}
     </div>
+    </>
   )
 }

@@ -388,7 +388,11 @@ def truncate_prompt(prompt: str, limit: int = MAX_SUMMARY_CHARS) -> str:
 
 
 def _extract_message_text(message: dict) -> str:
-    """Pull usable text from chat message (free-router models vary)."""
+    """Pull the answer text from a chat message (content only, never reasoning).
+
+    Reasoning/thinking fields are deliberately ignored: logging them would
+    leak chain-of-thought into the CSV instead of the requested summary.
+    """
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
@@ -397,15 +401,51 @@ def _extract_message_text(message: dict) -> str:
                  if isinstance(b, dict) and isinstance(b.get("text"), str)]
         if "".join(parts).strip():
             return "\n".join(parts)
-    reasoning = message.get("reasoning")
-    if isinstance(reasoning, str) and reasoning.strip():
-        return reasoning
-    details = message.get("reasoning_details")
-    if isinstance(details, list):
-        texts = [d.get("text", "") for d in details if isinstance(d, dict)]
-        if "".join(texts).strip():
-            return "\n".join(texts)
     return ""
+
+
+_SUMMARY_LABEL_RE = re.compile(
+    r"^(?:\*{0,2}\s*(?:summary|resumo|answer|resposta)\s*:+\s*\*{0,2}\s*)+",
+    re.IGNORECASE,
+)
+_SUMMARY_META_RES = tuple(
+    re.compile(pat, re.IGNORECASE) for pat in (
+        r"^here'?s\b",
+        r"^here is\b",
+        r"^think",
+        r"^thought\b",
+        r"^analy[sz]",
+        r"^step\s*\d",
+        r"^process\s*:",
+        r"^\d+\s*[.)]\s",
+    )
+)
+
+
+def clean_summary_text(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
+    """Reduce raw model output to a single summary sentence.
+
+    Keeps the first non-empty line, strips wrapping quotes and
+    "Summary:"-style labels, and rejects thinking-process leakage
+    (ValueError -> caller falls back to plain truncation).
+    """
+    line = ""
+    for raw_line in text.splitlines():
+        if raw_line.strip():
+            line = raw_line.strip()
+            break
+    line = line.strip("\"'`*“”‘’").strip()
+    line = _SUMMARY_LABEL_RE.sub("", line).strip("\"'`*“”‘’ ").strip()
+    lowered = line.lower()
+    if not line:
+        raise ValueError("empty summary from model")
+    if "thinking process" in lowered or any(pat.match(line) for pat in _SUMMARY_META_RES):
+        raise ValueError("model returned meta commentary instead of a summary")
+    one_line = " ".join(line.split())
+    if len(one_line) > limit:
+        cut = one_line[:limit].rsplit(" ", 1)[0] or one_line[:limit]
+        one_line = cut.rstrip(".,;:") + "."
+    return one_line
 
 
 def summarize_prompt_remote(
@@ -422,29 +462,27 @@ def summarize_prompt_remote(
             {
                 "role": "system",
                 "content": (
-                    "Summarize the following image prompt in exactly ONE complete "
-                    f"sentence of at most {MAX_SUMMARY_CHARS} characters, no line breaks. "
-                    "Write a full sentence that fully captures the request; never "
-                    "cut it off and never end with ellipsis. Reply with only the summary."
+                    "You summarize image prompts. Reply with EXACTLY ONE complete "
+                    f"sentence of at most {MAX_SUMMARY_CHARS} characters, no line breaks, "
+                    "in the same language as the image prompt. "
+                    "Output ONLY that sentence and NOTHING else: no thinking process, "
+                    "no reasoning, no analysis, no explanations, no preamble, "
+                    "no labels, no numbering, no quotation marks. "
+                    "Never cut the sentence off and never end with ellipsis."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user",
+             "content": f"{prompt}\n\nOutput only the summary sentence."},
         ],
         "max_tokens": 120,
-        "temperature": 0.2,
+        "temperature": 0.0,
     }
     status, raw = _post_json(CHAT_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
     if status != 200:
         raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
     payload = json.loads(raw)
-    content = _extract_message_text(payload["choices"][0]["message"]).strip()
-    one_line = " ".join(content.split())
-    if len(one_line) > MAX_SUMMARY_CHARS:
-        cut = one_line[:MAX_SUMMARY_CHARS].rsplit(" ", 1)[0] or one_line[:MAX_SUMMARY_CHARS]
-        one_line = cut.rstrip(".,;:") + "."
-    if not one_line:
-        raise ValueError("empty summary from model")
-    return one_line
+    content = _extract_message_text(payload["choices"][0]["message"])
+    return clean_summary_text(content)
 
 
 def summarize_prompt(
@@ -1170,11 +1208,41 @@ def run_gui(defaults: dict | None = None) -> None:
     # Precedence: hard defaults < config.json < explicit caller defaults.
     saved = sanitize_gui_config(load_gui_config())
     merged = {**saved, **{k: v for k, v in defaults.items() if v not in (None, "")}}
-    root = tk.Tk()
-    root.title("image_generate.py")
+    # WM_CLASS="ImageGenerate" so Ubuntu/GNOME dock shows our name
+    # instead of the default "tk" gear entry.
+    root = tk.Tk(className="ImageGenerate")
+    root.title("ImageGenerate")
+    try:
+        root.iconname("ImageGenerate")
+    except tk.TclError:
+        pass
     root.geometry("860x720")
 
-    state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None}
+    # Brand logo (logo.png next to this file): window icon + header.
+    # Missing/corrupt file -> plain text header, never blocks startup.
+    state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None,
+                   "logo_img": None}
+    try:
+        _logo_path = Path(__file__).resolve().parent / "logo.png"
+        if _logo_path.is_file():
+            _logo = tk.PhotoImage(file=str(_logo_path))
+            if _logo.width() > 48 or _logo.height() > 48:
+                _logo = _logo.subsample(max(1, _logo.width() // 48 + 1),
+                                        max(1, _logo.height() // 48 + 1))
+            state["logo_img"] = _logo
+            try:
+                root.iconphoto(True, _logo)
+            except tk.TclError:
+                pass
+    except (tk.TclError, OSError):
+        state["logo_img"] = None
+
+    if state["logo_img"] is not None:
+        header = ttk.Frame(root, padding=(8, 8, 8, 0))
+        header.pack(fill=tk.X)
+        ttk.Label(header, image=state["logo_img"]).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(header, text="ImageGenerate",
+                  font=("", 14, "bold")).pack(side=tk.LEFT)
 
     def pick_dir(var: tk.StringVar) -> None:
         chosen = filedialog.askdirectory()
