@@ -58,7 +58,11 @@ export default function Model(p: Props) {
       <input type="text" value={p.summaryModel} onChange={(e) => p.setSummaryModel(e.target.value)}
         placeholder="openrouter/free" />
 
-      <label className="field-label">API key {current?.configured ? `(configured via ${current.source})` : '(not configured)'}</label>
+      <label className="field-label">API key{' '}
+        {current?.configured
+          ? <span className="key-ok">(configured via {current.source})</span>
+          : <span className="key-bad">(not configured)</span>}
+      </label>
       <div className="row">
         <div style={{ flex: 3 }}>
           <input type="password" value={p.apiKey} onChange={(e) => p.setApiKey(e.target.value)} />

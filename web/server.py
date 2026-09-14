@@ -223,6 +223,58 @@ def api_log(output_dir: str | None = None) -> dict:
             "total_cost": round(total, 6), "fields": ig.LOG_FIELDS}
 
 
+@app.get("/api/browse")
+def api_browse(path: str | None = None) -> dict:
+    """List subdirectories of a server-side folder (localhost folder picker)."""
+    base = Path(path or str(Path.home())).expanduser()
+    try:
+        current = base.resolve()
+    except OSError as exc:
+        raise HTTPException(400, f"invalid path: {exc}") from exc
+    if not current.exists():
+        raise HTTPException(404, "folder not found")
+    if not current.is_dir():
+        raise HTTPException(400, "not a folder")
+    try:
+        dirs = sorted(
+            (d.name for d in current.iterdir() if d.is_dir()),
+            key=str.casefold,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, "permission denied") from exc
+    return {"path": str(current),
+            "parent": str(current.parent),
+            "home": str(Path.home()),
+            "dirs": dirs}
+
+
+class MkdirRequest(BaseModel):
+    path: str
+    name: str
+
+
+@app.post("/api/browse/mkdir")
+def api_mkdir(req: MkdirRequest) -> dict:
+    """Create a subfolder (used by the folder picker)."""
+    name = req.name.strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise HTTPException(400, "invalid folder name")
+    try:
+        base = Path(req.path).expanduser().resolve()
+    except OSError as exc:
+        raise HTTPException(400, f"invalid path: {exc}") from exc
+    if not base.is_dir():
+        raise HTTPException(404, "parent folder not found")
+    target = base / name
+    try:
+        target.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise HTTPException(409, "folder already exists") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, "permission denied") from exc
+    return {"path": str(target)}
+
+
 @app.get("/api/config")
 def api_get_config() -> dict:
     return ig.sanitize_gui_config(ig.load_gui_config())
