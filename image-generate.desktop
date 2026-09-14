@@ -5,9 +5,12 @@ Name=ImageGenerate
 GenericName=AI Image Generator
 Comment=Generate images via AI (prompt + context + references)
 Exec=python3 /home/ph/Documentos/ImageGenerate/image_generate.py --gui
+# Portable setups: run bash install.sh (uses Icon=image-generate from hicolor).
 Icon=/home/ph/Documentos/ImageGenerate/logo.png
 Terminal=false
 Categories=Graphics;2DGraphics;
 StartupNotify=true
-StartupWMClass=ImageGenerate
+# Must match the Tk window class EXACTLY (case-sensitive).
+# Verified with: xwininfo/xprop -> WM_CLASS = "imageGenerate", "Imagegenerate".
+StartupWMClass=Imagegenerate
 Keywords=ai;image;generate;openrouter;

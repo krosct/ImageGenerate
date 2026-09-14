@@ -40,7 +40,7 @@ export default function App() {
   return (
     <>
     <div className="page-bg" aria-hidden="true">
-      <img src="/logo-titulo.png" alt="" />
+      <img src="/logo.png" alt="" />
     </div>
     <div className="app">
       <header className="topbar">
