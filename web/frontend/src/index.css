@@ -314,7 +314,7 @@ nav.tabs button.active { background: var(--panel-3); color: var(--text-primary);
   cursor: text;
 }
 .count-pill input {
-  width: 30px;
+  width: 28px;
   background: transparent;
   border: 0;
   outline: 0;
