@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { api, listenJob, LogResponse } from '../api'
 
 interface Props {
@@ -42,6 +42,66 @@ export default function Generate(p: Props) {
   const [logOpen, setLogOpen] = useState(false)
   const [log, setLog] = useState<LogResponse | null>(null)
   const [done, setDone] = useState<{ images: string[]; cost: number } | null>(null)
+  const [muted, setMuted] = useState(false)
+  const [copied, setCopied] = useState<string | null>(null)
+  const audioRef = useRef<AudioContext | null>(null)
+
+  // Lazily created on the Generate click (a user gesture), so the
+  // browser allows playback later when the async job finishes.
+  function ensureAudio(): AudioContext | null {
+    try {
+      if (!audioRef.current) {
+        const Ctor = window.AudioContext
+          || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        if (!Ctor) return null
+        audioRef.current = new Ctor()
+      }
+      if (audioRef.current.state === 'suspended') void audioRef.current.resume()
+      return audioRef.current
+    } catch {
+      return null
+    }
+  }
+
+  // Small synthesized chime — no audio file needed.
+  function playAlert(kind: 'success' | 'error') {
+    if (muted) return
+    const ctx = ensureAudio()
+    if (!ctx) return
+    try {
+      const notes = kind === 'success' ? [659.25, 880.0] : [220.0, 164.81]
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        const t0 = ctx.currentTime + i * 0.16
+        osc.type = 'sine'
+        osc.frequency.value = freq
+        gain.gain.setValueAtTime(0.0001, t0)
+        gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.03)
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3)
+        osc.connect(gain).connect(ctx.destination)
+        osc.start(t0)
+        osc.stop(t0 + 0.32)
+      })
+    } catch {
+      /* audio is best-effort only */
+    }
+  }
+
+  async function copyPath(path: string) {
+    try {
+      await navigator.clipboard.writeText(path)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = path
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+    setCopied(path)
+    window.setTimeout(() => setCopied((c) => (c === path ? null : c)), 1600)
+  }
 
   async function refreshLog() {
     try {
@@ -54,6 +114,7 @@ export default function Generate(p: Props) {
   async function onGenerate() {
     if (!p.prompt.trim()) { setStatus('type a prompt first'); return }
     if (!p.summaryModel.trim()) { setStatus('fill in Summary model first (Model tab)'); return }
+    ensureAudio() // unlock sound on user gesture; chime plays when done
     setRunning(true)
     setElapsed(0)
     setDone(null)
@@ -81,6 +142,7 @@ export default function Generate(p: Props) {
           setElapsed(ev.result.elapsed)
           setStatus(`saved ${ev.result.images.length} image(s) | $${ev.result.cost.toFixed(6)}`)
           setDone({ images: ev.result.images, cost: ev.result.cost })
+          playAlert('success')
           setLogOpen(true)
           void refreshLog()
         } else if (ev.status === 'cancelled') {
@@ -89,6 +151,7 @@ export default function Generate(p: Props) {
         } else {
           setRunning(false)
           setStatus(`error: ${ev.error}`)
+          playAlert('error')
         }
       })
     } catch (e) {
@@ -167,6 +230,10 @@ export default function Generate(p: Props) {
           </span>
           {running && <span className="spinner"><div /></span>}
           <span className={statusClass} title="Current state: idle, generating, done, cancelled or error.">{status}</span>
+          <button className="ghost" onClick={() => setMuted(!muted)}
+            title={muted ? 'Unmute alert sound' : 'Mute alert sound'}>
+            {muted ? '🔕' : '🔔'}
+          </button>
           <span style={{ marginLeft: 'auto' }}>
             <button className="ghost" onClick={() => { setLogOpen(!logOpen); if (!logOpen) void refreshLog() }}>
               {logOpen ? 'Hide log ▲' : 'Show log ▼'}
@@ -207,15 +274,28 @@ export default function Generate(p: Props) {
 
       {done && (
         <div className="modal-bg" onClick={() => setDone(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Done — {done.images.length} image{done.images.length === 1 ? '' : 's'}</h3>
-            <div className="hint">Variants branch below, nothing overwritten · ${done.cost.toFixed(6)}</div>
+          <div className="modal success-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="success-head">
+              <span className="success-badge" aria-hidden="true">✓</span>
+              <div>
+                <h3>Image generated!</h3>
+                <div className="hint">
+                  {done.images.length} image{done.images.length === 1 ? '' : 's'} saved · ${done.cost.toFixed(6)}
+                </div>
+              </div>
+            </div>
             <div className="result-grid">
             {done.images.map((img) => {
               const name = img.split('/').pop() ?? img
               return (
                 <div key={img} className="result-card">
                   <img src={api.imageUrl(p.outputDir, name)} alt={name} />
+                  <div className="path-row" title={img}>
+                    <code className="path-text">{img}</code>
+                    <button className="ghost" onClick={() => void copyPath(img)}>
+                      {copied === img ? 'Copied ✓' : 'Copy path'}
+                    </button>
+                  </div>
                   <div><a href={api.imageUrl(p.outputDir, name)} target="_blank" rel="noreferrer">
                     <button className="ghost">Open full size</button>
                   </a> <span className="hint">{name}</span></div>
