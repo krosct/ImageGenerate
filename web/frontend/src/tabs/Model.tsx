@@ -53,7 +53,7 @@ export default function Model(p: Props) {
       <input type="text" value={p.model} onChange={(e) => p.setModel(e.target.value)}
         placeholder={p.providers.find((x) => x.id === p.provider)?.default_model} />
 
-      <label className="field-label" title="Chat model that writes the 1-sentence log summary. Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. Required: generation will not start with this field empty.">
+      <label className="field-label" title="Chat model that writes the 1-sentence log summary. Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. Free routers vary per call; on any failure the log falls back to local truncation. Required: generation will not start with this field empty.">
         Summary model ⓘ</label>
       <input type="text" value={p.summaryModel} onChange={(e) => p.setSummaryModel(e.target.value)}
         placeholder="openrouter/free" />

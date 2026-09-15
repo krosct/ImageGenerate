@@ -484,7 +484,12 @@ _SUMMARY_META_RES = tuple(
         r"^you (want|ask|request|said|provided)\b",
         r"^your (prompt|request|message)\b",
         r"^this (prompt|request|image|story)\b",
-        r"^i('ll|'m| will| am| have| understand| summarize)\b",
+        r"^i('ll|'m| will| am| have| understand| summarize| need| should| must)\b",
+        r"^we (need|will|should|must|have)\b",
+        r"^let me\b",
+        r"^the task\b",
+        r"^my task\b",
+        r"^the prompt\b",
         r"^as an ai\b",
         r"^based on\b",
         r"^to (summarize|create|complete)\b",
@@ -507,6 +512,12 @@ _SUMMARY_META_SUBSTRINGS = (
     "asks me to",
     "your prompt",
     "this prompt",
+    "the task is",
+    "my task is",
+    "we need to",
+    "i need to",
+    "let me ",
+    "same language as",
     "as an ai",
 )
 
@@ -606,7 +617,10 @@ def summarize_prompt_remote(
     if status != 200:
         raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
     payload = json.loads(raw)
-    content = _extract_message_text(payload["choices"][0]["message"])
+    message = payload["choices"][0]["message"]
+    if isinstance(message.get("refusal"), str) and message["refusal"].strip():
+        raise ValueError(f"model refused the summary request: {message['refusal'][:200]}")
+    content = _extract_message_text(message)
     return clean_summary_text(content)
 
 
@@ -1590,6 +1604,7 @@ def run_gui(defaults: dict | None = None) -> None:
     attach_help(summary_entry,
                 "Chat model that writes the 1-sentence log summary. "
                 "Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. "
+                "Free routers vary per call; on any failure the log falls back to local truncation. "
                 "Required: generation will not start with this field empty.")
     ttk.Label(tab_model, text="API key:").grid(row=3, column=0, sticky=tk.W, padx=4, pady=2)
     key_row = ttk.Frame(tab_model)

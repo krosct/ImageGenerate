@@ -499,6 +499,12 @@ class CleanSummaryTextTest(IsolatedEnvMixin):
             "Here is the summary: a cat.",
             "1. A cat in space.",
             "Step 1: summarize the prompt.",
+            # Live leak from nvidia/nemotron-3-super (thinking in content field):
+            "We need to output a single sentence, max 150 characters, in same "
+            "language as image prompt (Portuguese). Summarize the story.",
+            "Let me summarize this image prompt for the log.",
+            "The task is to summarize the prompt above.",
+            "The prompt describes a storyboard with 6 parts.",
         ]
         for text in bad:
             with self.assertRaises(ValueError, msg=text):
@@ -587,6 +593,27 @@ class SummarizePromptTest(IsolatedEnvMixin):
 
     def test_remote_empty_content_rejected(self):
         payload = {"choices": [{"message": {"content": ""}}]}
+        with mock.patch.object(ig, "_post_json", return_value=(200, json.dumps(payload))):
+            with self.assertRaises(ValueError):
+                ig.summarize_prompt_remote("p", "k", "m", 5)
+
+    def test_remote_null_content_rejected(self):
+        payload = {"choices": [{"message": {"content": None}}]}
+        with mock.patch.object(ig, "_post_json", return_value=(200, json.dumps(payload))):
+            with self.assertRaises(ValueError):
+                ig.summarize_prompt_remote("p", "k", "m", 5)
+
+    def test_remote_refusal_rejected(self):
+        payload = {"choices": [{"message": {"content": "A cat.", "refusal": "policy"}}]}
+        with mock.patch.object(ig, "_post_json", return_value=(200, json.dumps(payload))):
+            with self.assertRaises(ValueError):
+                ig.summarize_prompt_remote("p", "k", "m", 5)
+
+    def test_remote_thinking_in_content_rejected(self):
+        # Live shape from nvidia/nemotron-3-super: thinking leaked into content.
+        payload = {"choices": [{"message": {
+            "content": "We need to output a single sentence about the storyboard.",
+            "reasoning": "plan...", "refusal": None}}]}
         with mock.patch.object(ig, "_post_json", return_value=(200, json.dumps(payload))):
             with self.assertRaises(ValueError):
                 ig.summarize_prompt_remote("p", "k", "m", 5)
@@ -1219,6 +1246,16 @@ class FrontendParityTest(unittest.TestCase):
         # Same documented rule: empty cell repeats above, first row -> var name.
         self.assertEqual(ig.resolve_injection_rows([["", ""]], ["a", "b"]), [["a", "b"]])
         self.assertEqual(ig.extract_template_vars("x {{a}} y {{a}} z {{b}}"), ["a", "b"])
+
+    def test_summary_tooltips_share_example_and_fallback_note(self):
+        # GUI (tk) and web (React) must document the same summary-model
+        # guidance: a valid :free example plus the truncation-fallback note.
+        core = (REPO_ROOT / "image_generate.py").read_text(encoding="utf-8")
+        web = (REPO_ROOT / "web" / "frontend" / "src" / "tabs" / "Model.tsx").read_text(
+            encoding="utf-8")
+        for source, name in ((core, "tk GUI"), (web, "web Model.tsx")):
+            self.assertIn("openrouter/free", source, name)
+            self.assertIn("falls back to local truncation", source, name)
 
 
 if __name__ == "__main__":
