@@ -5,14 +5,15 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 
 # 🎯 Funcionalidade
 
-**Como usar (resumo):**
-
-1. **Escolha a interface:** CLI (`python3 image_generate.py --gui` para desktop, `python3 web/server.py` para navegador, ou apenas flags no terminal).
-2. **Defina o prompt:** digite o que quer ver (ex.: `"um farol à noite"`). Adicione contexto (`--context-dir`) ou referências visuais (`--memory-dir`) se precisar de consistência.
-3. **Ajuste a saída:** escolha proporção (`--prop`), resolução (`--resolution`), formato (`--output-format`) e, se quiser, temperatura (`--temperature 0.7`) e quantidade (`--count 3`).
-4. **Gere:** clique em **Generate** (GUI/Web) ou rode o comando (CLI). Se `count > 1`, confirma o custo adicional.
-5. **Veja o resultado:** a imagem aparece no modal (Web) ou no diálogo (GUI); o caminho está no log (`log_image_generate.csv`) e pode ser copiado.
-6. **Documentação completa:** abra [`docs.html`](docs.html) para instalação detalhada, tutorial OpenRouter, tabela de flags, API do backend e solução de problemas.
+- **Gera imagens a partir de prompt** — digite o que quer ver, receba a imagem.
+- **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
+- **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt; confirma o custo antes.
+- **Controla temperatura** — `--temperature 0.7` (0 a 2, vazio = padrão do modelo).
+- **Escolhe modelo, proporção, resolução, formato** — `meta/muse-image`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
+- **Salva log com custo** — `log_image_generate.csv` (data, prompt, arquivo, dimensões, custo, modelo, chave por hash).
+- **Funciona offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
+- **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o mesmo `run_generation()`.
+- **Documentação completa local** — [`docs.html`](docs.html) abre direto no navegador, sem internet.
 
 ---
 
