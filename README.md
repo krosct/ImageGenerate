@@ -22,7 +22,7 @@ Abra com `python3 image_generate.py --gui`. Três abas: **Generate** (prompt, pr
 
 <p align="center"><img src="logo-titulo.png" alt="Web" width="520" /></p>
 
-## 🌐 Versão Web (React + FastAPI)
+## 🌐 Versão web
 
 Sirva com `python3 web/server.py` (porta 8000, só `127.0.0.1`). Abra `http://127.0.0.1:8000`. Mesmas 3 abas, cronômetro ao vivo, Cancel, som de alerta no modal de sucesso, folder picker nas pastas locais, busca com highlight no conteúdo, logo como marca d'água no fundo. O `?` no topo abre `/help` (o `docs.html`).
 
