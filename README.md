@@ -9,7 +9,7 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 - **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
 - **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt.
 - **Controla a temperatura do modelo usado** — `--temperature 0.7`.
-- **Escolhe modelo, proporção, resolução, formato** — `meta/muse-image`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
+- **Escolhe modelo, proporção, resolução, formato** — `provider/model`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
 - **Salva log das requisições** — `log_image_generate.csv`.
 - **Teste offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
 - **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o core.
@@ -17,7 +17,7 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 
 ---
 
-# ❓ Como instalar (do zero até pronto)
+# ❓ Como instalar
 
 1. **Instale o Python 3.10+**:
 ```bash
