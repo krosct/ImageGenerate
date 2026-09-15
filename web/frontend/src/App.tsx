@@ -40,12 +40,12 @@ export default function App() {
   return (
     <>
     <div className="page-bg" aria-hidden="true">
-      <img src="/logo.png" alt="" />
+      <img src="/img/logo.png" alt="" />
     </div>
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <img className="brand-logo" src="/logo.png" alt="ImageGenerate logo" />
+          <img className="brand-logo" src="/img/logo.png" alt="ImageGenerate logo" />
           <span>
             <div className="brand-name">ImageGenerate</div>
             <div className="brand-sub">Generating your thoughts!</div>

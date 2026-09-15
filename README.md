@@ -18,19 +18,41 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 
 ## 🖥️ Versão GUI (Tkinter)
 
+```bash
+# GUI desktop
+python3 image_generate.py --gui
+```
+
 Abra com `python3 image_generate.py --gui`. Três abas: **Generate** (prompt, proporção, resolução, formato, seed, dry-run, botão Generate/Cancel, cronômetro, log), **Model** (provedor, modelo, temperatura 0–2, chave + remember/Forget) e **Dir** (pastas de saída/contexto/memória + Browse). O `?` no topo abre o `docs.html`. A janela usa `img/logo.png` como ícone e `WM_CLASS=ImageGenerate` para agrupar no dock do Ubuntu.
 
 <p align="center"><img src="img/guitk.png" alt="GUI" width="520" /></p>
 
 ## 🌐 Versão web
 
-Sirva com `python3 web/server.py` (porta 8000, só `127.0.0.1`). Abra `http://127.0.0.1:8000`. Mesmas 3 abas, cronômetro ao vivo, Cancel, som de alerta no modal de sucesso, folder picker nas pastas locais, busca com highlight no conteúdo, logo como marca d'água no fundo. O `?` no topo abre `/help` (o `docs.html`).
+```bash
+# Web (mesmo core, interface React + FastAPI)
+pip install -r web/requirements.txt
+cd web/frontend && npm install && npm run build && cd ../..
+python3 web/server.py   # abre http://127.0.0.1:8000
+```
 
 <p align="center"><img src="img/guiweb.png" alt="Web" width="520" /></p>
 
+Sirva com `python3 web/server.py` (porta 8000, só `127.0.0.1`). Abra `http://127.0.0.1:8000`. Mesmas 3 abas, cronômetro ao vivo, Cancel, som de alerta no modal de sucesso, folder picker nas pastas locais, busca com highlight no conteúdo, logo como marca d'água no fundo. O `?` no topo abre `/help` (o `docs.html`).
+
 ## 🧑‍💻 Versão CLI (terminal)
 
-Tudo da GUI via flags. Exemplo básico: `python3 image_generate.py --prompt "teste" --prop 1:1 --resolution 512 --dry-run`. Com chave: `export OPENROUTER_API_KEY="sk-or-..."` e depois `--prompt "..." --count 3 --temperature 0.7`. Use `--list-log` para ver o CSV.
+```bash
+# Básico (sem chave, só dry-run)
+python3 image_generate.py --prompt "teste" --prop 1:1 --resolution 512 --dry-run
+
+# Com chave (OpenRouter)
+export OPENROUTER_API_KEY="sk-or-..."
+python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1K --count 3 --temperature 0.7
+
+# Ver histórico
+python3 image_generate.py --list-log
+```
 
 ---
 

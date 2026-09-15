@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="description" content="ImageGenerate — documentação completa (CLI, GUI e Web)" />
 <title>ImageGenerate — Docs</title>
-<link rel="icon" type="image/png" href="logo.png" />
+<link rel="icon" type="image/png" href="img/logo.png" />
 <style>
 :root{
   --bg:#09090c; --bg-soft:#101014; --panel:#141419; --panel-2:#1c1c22;
@@ -130,7 +130,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <body>
 <header class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
-  <a class="brand" href="#top"><img class="brand-logo" src="logo.png" alt="ImageGenerate logo" /> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
+  <a class="brand" href="#top"><img class="brand-logo" src="img/logo.png" alt="ImageGenerate logo" /> ImageGenerate <span style="color:var(--muted);font-weight:400">/ docs</span></a>
   <input type="search" id="search" placeholder="Buscar na página…" aria-label="Buscar na página" />
   <span class="find-count" id="findCount" title="Ocorrência atual / total"></span>
   <button class="theme-btn" id="themeBtn" title="Alternar tema">🌙 / ☀️</button>
@@ -177,7 +177,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (só stdlib + <code class="inline">cryptography</code>)</td><td>Zero dependência pesada: sem Pillow (PNG/JPEG/WebP lidos à mão), sem requests (usa <code class="inline">http.client</code> para permitir cancelamento real)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI, só <code class="inline">127.0.0.1</code></td><td>Expõe o mesmo núcleo via HTTP para o frontend React; roda local, nada sai da máquina além das chamadas à API do provedor</td></tr>
 <tr><td><code class="inline">web/frontend/</code></td><td>React + TypeScript + Vite</td><td>Interface moderna (tema Superdesign): composer de prompt, histórico, modal de resultado com som</td></tr>
-<tr><td><code class="inline">logo.png</code></td><td>Marca</td><td>Favicon + logo no topbar web, ícone da janela GUI e do launcher Linux</td></tr>
+<tr><td><code class="inline">img/logo.png</code></td><td>Marca</td><td>Favicon + logo no topbar web, ícone da janela GUI e do launcher Linux</td></tr>
 <tr><td><code class="inline">install.sh</code></td><td>Instalador do launcher Linux</td><td>Gera o <code class="inline">.desktop</code> com os caminhos reais da máquina (arquivo com caminhos pessoais não vai ao git)</td></tr>
 </table>
 
@@ -256,7 +256,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Cronômetro:</strong> tempo entre enviar o pedido e receber a imagem (não o tempo total do programa).</li>
 <li><strong>Dicas flutuantes:</strong> passe o mouse sobre os campos — cada um explica o que faz.</li>
 <li><strong>Preview de proporção:</strong> o ⓘ ao lado de “Aspect” desenha o retângulo da proporção escolhida.</li>
-<li><strong>Ícone no dock:</strong> a janela usa <code class="inline">logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
+<li><strong>Ícone no dock:</strong> a janela usa <code class="inline">img/logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
 <li><strong>Temperatura (aba Model):</strong> número 0–2, vazio = padrão do provedor; letras/símbolos/fora da faixa bloqueiam a geração com erro.</li>
 <li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 abre confirmação avisando que cada imagem pode somar custo.</li>
 </ul>
@@ -372,7 +372,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (arquivo único)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI</td></tr>
 <tr><td><code class="inline">web/frontend/src/</code></td><td>React: <code class="inline">App.tsx</code>, <code class="inline">api.ts</code>, <code class="inline">tabs/Generate|Model|Dir.tsx</code></td></tr>
-<tr><td><code class="inline">logo.png / logo+titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
+<tr><td><code class="inline">img/logo.png / logo+titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
 <tr><td><code class="inline">install.sh</code></td><td>Gera e instala o launcher Linux (o <code class="inline">.desktop</code> é local, ignorado no git)</td></tr>
 <tr><td><code class="inline">docs.html</code></td><td>Esta documentação (arquivo único, sem dependências)</td></tr>
 </table>
