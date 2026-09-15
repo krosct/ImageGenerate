@@ -52,7 +52,7 @@ class GenerateRequest(BaseModel):
     output_format: str = "png"
     seed: int | None = None
     count: int = 1
-    temperature: str | float | None = None
+    injection: list[dict[str, str]] = []
     dry_run: bool = False
     api_key: str | None = None
     remember_key: bool = False
@@ -68,7 +68,6 @@ class ConfigUpdate(BaseModel):
     prop: str = "1:1"
     resolution: str = "1K"
     output_format: str = "png"
-    temperature: str = ""
     dry_run: bool = False
 
 
@@ -94,10 +93,10 @@ def _job_or_404(job_id: str) -> dict:
     return job
 
 
-def _run_job(job_id: str, kwargs: dict) -> None:
+def _run_job(job_id: str, prompts: list[str], kwargs: dict) -> None:
     job = _job_or_404(job_id)
     try:
-        result = ig.run_generation(**kwargs)
+        result = ig.run_generation_batch(prompts, **kwargs)
     except ig.GenerationCancelled:
         with JOBS_LOCK:
             job["status"] = "cancelled"
@@ -136,10 +135,6 @@ def api_generate(req: GenerateRequest) -> dict:
         count = ig.parse_count(req.count)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    try:
-        temperature = ig.parse_temperature("" if req.temperature is None else str(req.temperature))
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
     api_key, source = ig.resolve_api_key(provider, req.api_key or None)
     if req.remember_key and (req.api_key or "").strip():
         try:
@@ -147,10 +142,26 @@ def api_generate(req: GenerateRequest) -> dict:
         except RuntimeError as exc:
             raise HTTPException(400, str(exc)) from exc
     out = _safe_output_dir(req.output_dir)
+    var_names = ig.extract_template_vars(req.prompt)
+    prompts = [req.prompt]
+    if req.injection:
+        if not var_names:
+            raise HTTPException(400, "injection given but the prompt has no {{variables}}")
+        cells = [[str(row.get(name, "") or "") for name in var_names]
+                 for row in req.injection]
+        if not any(cell.strip() for row in cells for cell in row):
+            raise HTTPException(400, "injection table is completely empty")
+        rows = ig.resolve_injection_rows(cells, var_names)
+        prompts = [ig.apply_template_values(req.prompt, dict(zip(var_names, row)))
+                   for row in rows]
+        count = len(prompts)
+    elif count > 1 and var_names:
+        raise HTTPException(
+            400, "prompt has {{variables}} and count > 1: send the injection table "
+                 "(one row per generation)")
     cancel_event = threading.Event()
     job_id = uuid.uuid4().hex
     kwargs = {
-        "prompt": req.prompt,
         "output_dir": str(out),
         "context_dir": req.context_dir or None,
         "memory_dir": req.memory_dir or None,
@@ -164,13 +175,13 @@ def api_generate(req: GenerateRequest) -> dict:
         "api_key": api_key,
         "dry_run": req.dry_run,
         "provider": provider,
-        "temperature": temperature,
         "cancel_event": cancel_event,
     }
     with JOBS_LOCK:
         JOBS[job_id] = {"status": "running", "start": time.perf_counter(),
                         "cancel_event": cancel_event}
-    threading.Thread(target=_run_job, args=(job_id, kwargs), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, prompts, kwargs),
+                     daemon=True).start()
     return {"job_id": job_id, "key_source": source}
 
 
@@ -236,12 +247,16 @@ def api_log(output_dir: str | None = None) -> dict:
 
 @app.get("/api/browse")
 def api_browse(path: str | None = None) -> dict:
-    """List subdirectories of a server-side folder (localhost folder picker)."""
+    """List subdirectories of a server-side folder (localhost folder picker).
+    If the path does not exist, walks up to the nearest existing parent."""
     base = Path(path or str(Path.home())).expanduser()
     try:
         current = base.resolve()
     except OSError as exc:
         raise HTTPException(400, f"invalid path: {exc}") from exc
+    # Walk up until we find an existing directory (handles missing leaf dirs)
+    while current != current.parent and not current.exists():
+        current = current.parent
     if not current.exists():
         raise HTTPException(404, "folder not found")
     if not current.is_dir():

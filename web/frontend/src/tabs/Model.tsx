@@ -8,8 +8,6 @@ interface Props {
   setModel: (v: string) => void
   summaryModel: string
   setSummaryModel: (v: string) => void
-  temperature: string
-  setTemperature: (v: string) => void
   apiKey: string
   setApiKey: (v: string) => void
   rememberKey: boolean
@@ -59,11 +57,6 @@ export default function Model(p: Props) {
         Summary model ⓘ</label>
       <input type="text" value={p.summaryModel} onChange={(e) => p.setSummaryModel(e.target.value)}
         placeholder="openrouter/free" />
-
-      <label className="field-label" title="Sampling temperature 0-2 (blank = provider default). Numbers only; anything else blocks generation with an error. Note: undocumented for the images API, support is model-dependent.">
-        Temperature ⓘ</label>
-      <input type="text" value={p.temperature} onChange={(e) => p.setTemperature(e.target.value)}
-        placeholder="blank = provider default" inputMode="decimal" />
 
       <label className="field-label">API key{' '}
         {current?.configured

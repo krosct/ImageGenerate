@@ -42,6 +42,9 @@ import sys
 import threading
 import time
 import urllib.parse
+import subprocess
+import tempfile
+import wave
 import zlib
 from pathlib import Path
 
@@ -131,28 +134,8 @@ def normalize_provider(name: str) -> str:
     return slug
 
 
-MIN_TEMPERATURE = 0.0
-MAX_TEMPERATURE = 2.0
 MIN_COUNT = 1
-MAX_COUNT = 10  # OpenRouter images API upper bound for n
-
-
-def parse_temperature(raw: str | float | None) -> float | None:
-    """Parse optional temperature (blank -> None). Raises ValueError."""
-    text = str(raw).strip() if raw is not None else ""
-    if not text:
-        return None
-    try:
-        value = float(text)
-    except ValueError:
-        raise ValueError(
-            f"invalid temperature: {raw!r} (need a number {MIN_TEMPERATURE:g}-{MAX_TEMPERATURE:g})"
-        ) from None
-    if not math.isfinite(value) or not MIN_TEMPERATURE <= value <= MAX_TEMPERATURE:
-        raise ValueError(
-            f"invalid temperature: {raw!r} (need a number {MIN_TEMPERATURE:g}-{MAX_TEMPERATURE:g})"
-        )
-    return value
+MAX_COUNT = 10
 
 
 def parse_count(raw: str | int | None) -> int:
@@ -287,7 +270,6 @@ CONFIG_KEYS = (
     "prop",
     "resolution",
     "output_format",
-    "temperature",
     "dry_run",
 )
 
@@ -343,11 +325,6 @@ def sanitize_gui_config(data: dict) -> dict:
     clean["resolution"] = res if res in RESOLUTIONS else "1K"
     fmt = str(data.get("output_format", "png"))
     clean["output_format"] = fmt if fmt in OUTPUT_FORMATS else "png"
-    try:
-        parsed = parse_temperature(data.get("temperature", ""))
-        clean["temperature"] = "" if parsed is None else str(parsed)
-    except ValueError:
-        clean["temperature"] = ""
     clean["dry_run"] = bool(data.get("dry_run", False))
     return clean
 
@@ -421,6 +398,47 @@ def build_final_prompt(base_prompt: str, context_text: str, prop: str, resolutio
     return "\n\n".join(c for c in chunks if c)
 
 
+TEMPLATE_PATTERN = re.compile(r"\{\{([^{}]*)\}\}")
+
+
+def extract_template_vars(prompt: str) -> list[str]:
+    """Return unique {{variable}} names found in the prompt, in order."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for match in TEMPLATE_PATTERN.finditer(prompt):
+        name = match.group(1).strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def apply_template_values(prompt: str, values: dict[str, str]) -> str:
+    """Replace each {{name}} with its value (unmatched placeholders stay)."""
+    return TEMPLATE_PATTERN.sub(
+        lambda m: values.get(m.group(1).strip(), m.group(0)), prompt
+    )
+
+
+def resolve_injection_rows(
+    cells: list[list[str]], var_names: list[str]
+) -> list[list[str]]:
+    """Fill empty cells: repeat the value above; first row falls back to the
+    variable name itself."""
+    rows: list[list[str]] = []
+    previous = [""] * len(var_names)
+    for row in cells:
+        filled: list[str] = []
+        for j in range(len(var_names)):
+            value = (row[j] if j < len(row) else "").strip()
+            if not value:
+                value = previous[j] or var_names[j]
+            filled.append(value)
+            previous[j] = value
+        rows.append(filled)
+    return rows
+
+
 def truncate_prompt(prompt: str, limit: int = MAX_SUMMARY_CHARS) -> str:
     """Collapse prompt to a single line with max length (offline fallback)."""
     one_line = " ".join(prompt.strip().split())
@@ -434,7 +452,7 @@ def _extract_message_text(message: dict) -> str:
 
     Reasoning/thinking fields are deliberately ignored: logging them would
     leak chain-of-thought into the CSV instead of the requested summary.
-    """
+    If content is empty (e.g. reasoning-only models), fall back to reasoning text."""
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
@@ -443,6 +461,16 @@ def _extract_message_text(message: dict) -> str:
                  if isinstance(b, dict) and isinstance(b.get("text"), str)]
         if "".join(parts).strip():
             return "\n".join(parts)
+    # Fallback for reasoning-only responses (e.g. openrouter/free)
+    reasoning_details = message.get("reasoning_details") or message.get("reasoning")
+    if isinstance(reasoning_details, list):
+        texts = [d.get("text", "") for d in reasoning_details
+                 if isinstance(d, dict) and isinstance(d.get("text"), str)]
+        joined = " ".join(texts).strip()
+        if joined:
+            return joined
+    if isinstance(reasoning_details, str) and reasoning_details.strip():
+        return reasoning_details.strip()
     return ""
 
 
@@ -490,6 +518,39 @@ def clean_summary_text(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
     return one_line
 
 
+def play_chime(kind: str = "success") -> None:
+    """Play a short, quiet notification blip (success = high, error = low)."""
+    try:
+        freq = 880.0 if kind == "success" else 220.0
+        rate = 44100
+        duration = 0.12
+        fade = 0.02
+        peak = 0.12  # keep it subtle: ~12% of full scale
+        samples: list[float] = []
+        t = 0.0
+        while t < duration:
+            amp = peak
+            if t < fade:  # fade in/out to avoid clicks
+                amp *= t / fade
+            elif t > duration - fade:
+                amp *= (duration - t) / fade
+            samples.append(amp * math.sin(2 * math.pi * freq * t))
+            t += 1.0 / rate
+        data = struct.pack("<" + "h" * len(samples),
+                           *(int(s * 32767) for s in samples))
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            path = f.name
+        with wave.open(path, "w") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(data)
+        subprocess.run(["aplay", "-q", path], capture_output=True)
+        os.unlink(path)
+    except Exception:
+        pass
+
+
 def summarize_prompt_remote(
     prompt: str,
     api_key: str,
@@ -503,20 +564,21 @@ def summarize_prompt_remote(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": [{"type": "text", "text": (
                     "You summarize image prompts. Reply with EXACTLY ONE complete "
                     f"sentence of at most {MAX_SUMMARY_CHARS} characters, no line breaks, "
                     "in the same language as the image prompt. "
                     "Output ONLY that sentence and NOTHING else: no thinking process, "
                     "no reasoning, no analysis, no explanations, no preamble, "
                     "no labels, no numbering, no quotation marks. "
-                    "Never cut the sentence off and never end with ellipsis."
-                ),
+                    "Never cut the sentence off and never end with ellipsis. "
+                    "If the prompt is already short, still return a concise single sentence."
+                )}],
             },
             {"role": "user",
              "content": f"{prompt}\n\nOutput only the summary sentence."},
         ],
-        "max_tokens": 120,
+        "max_tokens": 200,
         "temperature": 0.0,
     }
     status, raw = _post_json(CHAT_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
@@ -762,7 +824,6 @@ def request_openrouter(
     output_format: str,
     seed: int | None,
     count: int,
-    temperature: float | None,
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
@@ -779,17 +840,12 @@ def request_openrouter(
         body["input_references"] = references
     if seed is not None:
         body["seed"] = seed
-    if temperature is not None:
-        # Undocumented for the images endpoint (model-dependent): sent only
-        # when the user explicitly sets it; empty means "provider default".
-        body["temperature"] = temperature
     start = time.perf_counter()
     start_ts = time.time()
     status, raw = _post_json(API_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
+    elapsed = time.perf_counter() - start
     if status != 200:
         raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
-    elapsed = time.perf_counter() - start
-    _ = start_ts
     payload = json.loads(raw)
     return payload, start_ts, elapsed
 
@@ -805,7 +861,6 @@ def request_gemini(
     output_format: str,
     seed: int | None,
     count: int,
-    temperature: float | None,
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
@@ -932,7 +987,6 @@ def run_generation(
     dry_run: bool = False,
     summary_model: str = "",
     provider: str = DEFAULT_PROVIDER,
-    temperature: float | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
     """Run one generation request and update the CSV log. Returns result dict.
@@ -1003,7 +1057,6 @@ def run_generation(
                     output_format=output_format,
                     seed=seed,
                     count=count,
-                    temperature=temperature,
                     timeout_s=timeout_s,
                     cancel_event=cancel_event,
                 )
@@ -1032,6 +1085,9 @@ def run_generation(
             image_box["error"] = exc
 
     def fetch_summary() -> None:
+        if not summary_model or not summary_model.strip():
+            summary_box["summary"] = "No model selected"
+            return
         # summarize_prompt already falls back to truncation on any failure
         # (except cancellation, which propagates).
         try:
@@ -1115,6 +1171,59 @@ def run_generation(
     }
 
 
+def run_generation_batch(prompts: list[str], **kwargs: object) -> dict:
+    """Run one generation per prompt (Injection mode). Aggregates the results.
+
+    kwargs are forwarded to run_generation(); a "count" key is overridden
+    to 1 per prompt. Shares the cancel_event: cancelling aborts the whole
+    batch, removes partial files and logs nothing.
+    """
+    if len(prompts) <= 1:
+        return run_generation(prompt=prompts[0], **kwargs)  # type: ignore[arg-type]
+    images: list[str] = []
+    entries: list[dict] = []
+    total_cost = 0.0
+    total_elapsed = 0.0
+    log_path = ""
+    for one_prompt in prompts:
+        result = run_generation(prompt=one_prompt, **{**kwargs, "count": 1})  # type: ignore[arg-type]
+        images.extend(result["images"])
+        entries.extend(result["entries"])
+        total_cost += result["cost"]
+        total_elapsed += result["elapsed"]
+        log_path = result["log_path"]
+    return {
+        "images": images,
+        "entries": entries,
+        "log_path": log_path,
+        "elapsed": total_elapsed,
+        "cost": total_cost,
+        "total_ops": len(entries),
+        "total_cost": total_cost,
+    }
+
+
+def parse_injection_row(spec: str, var_names: list[str]) -> list[str]:
+    """Parse "name=value,name=value" into a values list ordered by var_names.
+
+    Unknown variable names raise ValueError. Missing variables become "".
+    """
+    values: dict[str, str] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ValueError(f"invalid --inject item: {part!r} (expected name=value)")
+        if name not in var_names:
+            raise ValueError(
+                f"unknown variable {name!r} (prompt variables: {', '.join(var_names)})")
+        values[name] = value.strip()
+    return [values.get(name, "") for name in var_names]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1140,9 +1249,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-format", default="png", choices=OUTPUT_FORMATS)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--count", "--n", dest="count", type=int, default=1)
-    parser.add_argument("--temperature", default="",
-                        help="Sampling temperature 0-2 (empty = provider default; "
-                             "undocumented for images, model-dependent).")
+    parser.add_argument("--inject", action="append", default=[],
+                        metavar="NAME=VALUE[,NAME=VALUE…]",
+                        help="Values for {{variables}} in the prompt, one option "
+                             "per generation (implies one generation per option). "
+                             "Example: --inject 'pessoa=menino,objeto=sorvete'. "
+                             "Empty value repeats the previous row / variable name.")
     parser.add_argument("--api-key", default="",
                         help="API key for the provider (else env var, else remembered vault).")
     parser.add_argument("--remember-key", action="store_true",
@@ -1209,10 +1321,29 @@ def main_cli(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    try:
-        temperature = parse_temperature(args.temperature)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    var_names = extract_template_vars(prompt)
+    prompts = [prompt]
+    if args.inject:
+        if not var_names:
+            print("error: --inject given but the prompt has no {{variables}}",
+                  file=sys.stderr)
+            return 2
+        try:
+            cells = [parse_injection_row(spec, var_names) for spec in args.inject]
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not any(cell.strip() for row in cells for cell in row):
+            print("error: all --inject rows are empty", file=sys.stderr)
+            return 2
+        rows = resolve_injection_rows(cells, var_names)
+        prompts = [apply_template_values(prompt, dict(zip(var_names, row)))
+                   for row in rows]
+        count = len(prompts)
+    elif count > 1 and var_names:
+        print("error: prompt has {{variables}} and count > 1: pass one --inject "
+              "'name=value,…' option per generation (or use the GUI Injection tab)",
+              file=sys.stderr)
         return 2
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     model = args.model or PROVIDERS[provider]["default_model"]
@@ -1229,8 +1360,8 @@ def main_cli(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGINT, _handle_sigint)
     try:
-        result = run_generation(
-            prompt=prompt,
+        result = run_generation_batch(
+            prompts,
             output_dir=output_dir,
             context_dir=args.context_dir or None,
             memory_dir=args.memory_dir or None,
@@ -1245,13 +1376,11 @@ def main_cli(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             summary_model=args.summary_model,
             provider=provider,
-            temperature=temperature,
             cancel_event=cancel_event,
         )
     except GenerationCancelled:
         print("cancelled: partial files removed, nothing logged")
         return 130
-    finally:
         signal.signal(signal.SIGINT, prev_sigint)
     print(f"done in {result['elapsed']:.1f}s (cli measured {time.perf_counter() - t0:.1f}s)")
     for image in result["images"]:
@@ -1280,7 +1409,25 @@ def run_gui(defaults: dict | None = None) -> None:
         root.iconname("ImageGenerate")
     except tk.TclError:
         pass
-    root.geometry("860x720")
+    root.geometry("850x600")
+
+    # Modern button colors for Generate (light green) and Cancel (light red)
+    style = ttk.Style()
+    style.configure("Generate.TButton", background="#86efac", foreground="#052e16",
+                    font=("TkDefaultFont", 10, "bold"), padding=6)
+    style.map("Generate.TButton", background=[("active", "#a7f3d0"), ("disabled", "#d4f5e6")])
+    style.configure("Cancel.TButton", background="#f28b82", foreground="#3a0a0a",
+                    font=("TkDefaultFont", 10), padding=6)
+    style.map("Cancel.TButton", background=[("active", "#f8a8a0"), ("disabled", "#f5ccc8")])
+    style.configure("Help.TButton", background="#8ab4f8", foreground="#052e16",
+                    font=("TkDefaultFont", 10, "bold"), padding=4)
+    style.map("Help.TButton", background=[("active", "#b0c8f5"), ("disabled", "#c8d8f5")])
+    style.configure("MuteOff.TButton", background="#c8f0d8", foreground="#052e16",
+                    font=("TkDefaultFont", 9), padding=4)
+    style.map("MuteOff.TButton", background=[("active", "#d4f5e6")])
+    style.configure("MuteOn.TButton", background="#f5ccc8", foreground="#3a0a0a",
+                    font=("TkDefaultFont", 9), padding=4)
+    style.map("MuteOn.TButton", background=[("active", "#f8d0c8")])
 
     # Brand logo (img/logo.png next to this file): window icon + header.
     # Missing/corrupt file -> plain text header, never blocks startup.
@@ -1323,7 +1470,7 @@ def run_gui(defaults: dict | None = None) -> None:
         else:
             messagebox.showwarning("Docs", f"docs.html not found:\n{docs}")
 
-    ttk.Button(header, text="?", width=3, command=open_docs).pack(side=tk.RIGHT)
+    ttk.Button(header, text="?", width=3, command=open_docs, style="Help.TButton").pack(side=tk.RIGHT)
 
     def pick_dir(var: tk.StringVar) -> None:
         chosen = filedialog.askdirectory()
@@ -1339,6 +1486,10 @@ def run_gui(defaults: dict | None = None) -> None:
     notebook.add(tab_generate, text="Generate")
     notebook.add(tab_model, text="Model")
     notebook.add(tab_dir, text="Dir")
+    tab_injection = ttk.Frame(notebook, padding=8)
+    notebook.add(tab_injection, text="Injection")
+    notebook.hide(tab_injection)
+    injection_entries: list[list[ttk.Entry]] = []
 
     out_var = tk.StringVar(value=str(merged.get("output_dir") or default_output_dir()))
     ctx_var = tk.StringVar(value=str(merged.get("context_dir", "")))
@@ -1355,7 +1506,6 @@ def run_gui(defaults: dict | None = None) -> None:
     prop_var = tk.StringVar(value=str(merged.get("prop", "1:1")))
     res_var = tk.StringVar(value=str(merged.get("resolution", "1K")))
     fmt_var = tk.StringVar(value=str(merged.get("output_format", "png")))
-    temp_var = tk.StringVar(value=str(merged.get("temperature", "")))
     seed_var = tk.StringVar(value="")
     count_var = tk.StringVar(value="1")
     _initial_key, _initial_source = resolve_api_key(provider_var.get())
@@ -1432,18 +1582,11 @@ def run_gui(defaults: dict | None = None) -> None:
     forget_btn = ttk.Button(key_row, text="Forget",
                             command=lambda: on_forget_key())
     forget_btn.pack(side=tk.LEFT)
-    ttk.Label(tab_model, text="Temperature:").grid(row=4, column=0, sticky=tk.W, padx=4, pady=2)
-    temp_entry = ttk.Entry(tab_model, textvariable=temp_var, width=60)
-    temp_entry.grid(row=4, column=1, sticky=tk.EW, padx=4)
-    attach_help(temp_entry,
-                "Sampling temperature 0-2 (blank = provider default). "
-                "Accepts numbers only; anything else blocks generation. "
-                "Note: undocumented for the images API, support is model-dependent.")
     tab_model.columnconfigure(1, weight=1)
 
     # ---- Dir tab: output / context / memory dirs ----
-    drow = 0
     dir_entries: dict = {}
+    drow = 0
     for label, var in (("Output dir:", out_var), ("Context dir:", ctx_var), ("Memory dir:", mem_var)):
         ttk.Label(tab_dir, text=label).grid(row=drow, column=0, sticky=tk.W, padx=4, pady=2)
         entry = ttk.Entry(tab_dir, textvariable=var, width=60)
@@ -1459,7 +1602,7 @@ def run_gui(defaults: dict | None = None) -> None:
     # in the requested layout, kept here next to the prompt) ----
     opts = ttk.Frame(tab_generate)
     opts.pack(fill=tk.X, pady=4)
-    ttk.Label(opts, text="Aspect (prop):").pack(side=tk.LEFT, padx=4)
+    ttk.Label(opts, text="Aspect:").pack(side=tk.LEFT, padx=4)
     prop_combo = ttk.Combobox(opts, textvariable=prop_var, values=ASPECT_RATIOS, width=8, state="readonly")
     prop_combo.pack(side=tk.LEFT)
     ttk.Label(opts, text="Resolution:").pack(side=tk.LEFT, padx=(12, 4))
@@ -1543,12 +1686,70 @@ def run_gui(defaults: dict | None = None) -> None:
     prompt_text = tk.Text(prompt_frame, height=8, wrap=tk.WORD)
     prompt_text.pack(fill=tk.BOTH, expand=True)
 
+    # ---- Injection tab: per-generation values for {{variables}} ----
+    def current_template_vars() -> list[str]:
+        return extract_template_vars(prompt_text.get("1.0", tk.END))
+
+    injection_names: list[str] = []
+
+    def refresh_injection_tab(*_args: object) -> None:
+        try:
+            count = parse_count(count_var.get())
+        except ValueError:
+            count = 1
+        names = current_template_vars()
+        active = count > 1 and bool(names)
+        # Preserve typed values across rebuilds (keyed by variable name).
+        old_values = [[entry.get() for entry in row] for row in injection_entries]
+        old_names = list(injection_names)
+        for child in tab_injection.winfo_children():
+            child.destroy()
+        injection_entries.clear()
+        injection_names[:] = names if active else []
+        if not active:
+            try:
+                notebook.tab(tab_injection, text="Injection")
+            except tk.TclError:
+                pass
+            notebook.hide(tab_injection)
+            return
+        ttk.Label(
+            tab_injection,
+            text="Fill one value per generation. An empty cell repeats the value "
+            "from the row above; the first row falls back to the variable name.",
+            wraplength=620, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 6))
+        grid = ttk.Frame(tab_injection)
+        grid.pack(fill=tk.BOTH, expand=True)
+        for j, name in enumerate(names):
+            ttk.Label(grid, text=name, font=("", 10, "bold")).grid(
+                row=0, column=j, padx=4, pady=2, sticky=tk.EW)
+        for i in range(count):
+            row_entries: list[ttk.Entry] = []
+            for j, name in enumerate(names):
+                entry = ttk.Entry(grid, width=24)
+                if name in old_names and i < len(old_values):
+                    entry.insert(0, old_values[i][old_names.index(name)])
+                entry.grid(row=i + 1, column=j, padx=4, pady=2, sticky=tk.EW)
+                row_entries.append(entry)
+            injection_entries.append(row_entries)
+        for j in range(len(names)):
+            grid.columnconfigure(j, weight=1)
+        try:
+            notebook.tab(tab_injection, foreground="#e6c600")
+        except tk.TclError:
+            notebook.tab(tab_injection, text="\U0001f7e1 Injection")
+        notebook.add(tab_injection)
+
+    prompt_text.bind("<KeyRelease>", refresh_injection_tab)
+    count_var.trace_add("write", lambda *_a: refresh_injection_tab())
+
     # ---- collapsible log list (spoiler, hidden by default) ----
     log_frame = ttk.LabelFrame(tab_generate, text="Summary", padding=8)
     columns = tuple(LOG_FIELDS)
     list_container = ttk.Frame(log_frame)
     list_container.pack(fill=tk.BOTH, expand=True)
-    tree = ttk.Treeview(list_container, columns=columns, show="headings", height=8)
+    tree = ttk.Treeview(list_container, columns=columns, show="headings", height=4)
     wide_columns = {"prompt_summary": 320, "prompt_full": 400, "image_file": 200,
                     "model": 220, "date": 160, "generation_timestamp": 160}
     for col in columns:
@@ -1573,7 +1774,7 @@ def run_gui(defaults: dict | None = None) -> None:
     # ---- actions + clock (Generate tab) ----
     bar = ttk.Frame(tab_generate, padding=(4, 4))
     bar.pack(fill=tk.X)
-    gen_btn = ttk.Button(bar, text="Generate")
+    gen_btn = ttk.Button(bar, text="Generate", style="Generate.TButton")
     gen_btn.pack(side=tk.LEFT)
     ttk.Label(bar, text="×").pack(side=tk.LEFT, padx=(4, 0))
     count_entry = ttk.Entry(bar, textvariable=count_var, width=4,
@@ -1581,7 +1782,7 @@ def run_gui(defaults: dict | None = None) -> None:
                             validatecommand=(root.register(
                                 lambda v: v == "" or v.isdigit()), "%P"))
     count_entry.pack(side=tk.LEFT)
-    cancel_btn = ttk.Button(bar, text="Cancel", state=tk.DISABLED)
+    cancel_btn = ttk.Button(bar, text="Cancel", state=tk.DISABLED, style="Cancel.TButton")
     cancel_btn.pack(side=tk.LEFT, padx=4)
     clock_var = tk.StringVar(value="elapsed: 0.0s")
     clock_label = ttk.Label(bar, textvariable=clock_var, font=("TkDefaultFont", 11, "bold"))
@@ -1595,6 +1796,15 @@ def run_gui(defaults: dict | None = None) -> None:
     spoiler_state = {"visible": False}
     spoiler_btn = ttk.Button(bar, text="Show log \u25bc")
     spoiler_btn.pack(side=tk.RIGHT)
+    muted_var = tk.BooleanVar(value=False)
+    def toggle_mute() -> None:
+        muted_var.set(not muted_var.get())
+        if muted_var.get():
+            mute_btn.configure(text="\U0001F515", style="MuteOn.TButton")
+        else:
+            mute_btn.configure(text="\U0001F514", style="MuteOff.TButton")
+    mute_btn = ttk.Button(bar, text="\U0001F514", style="MuteOff.TButton", command=toggle_mute)
+    mute_btn.pack(side=tk.RIGHT, padx=4)
 
     def toggle_log(force: bool | None = None) -> None:
         show = force if force is not None else not spoiler_state["visible"]
@@ -1684,6 +1894,7 @@ def run_gui(defaults: dict | None = None) -> None:
             return
         prompt_text.delete("1.0", tk.END)
         prompt_text.insert("1.0", full)
+        refresh_injection_tab()
         notebook.select(tab_generate)
         status_var.set("prompt loaded from log")
 
@@ -1769,17 +1980,21 @@ def run_gui(defaults: dict | None = None) -> None:
             return
         if error:
             status_var.set(f"error: {error}")
+            if not muted_var.get():
+                play_chime("error")
             messagebox.showerror("Generation failed", error)
         else:
             assert result is not None
             clock_var.set(f"elapsed: {result['elapsed']:.1f}s (done)")
             status_var.set(f"saved {len(result['images'])} image(s) | ${result['cost']:.6f}")
+            if not muted_var.get():
+                play_chime("success")
             show_done_dialog(list(result["images"]))
         toggle_log(True)
 
-    def worker(prompt: str, kwargs: dict) -> None:
+    def worker(prompts: list[str], kwargs: dict) -> None:
         try:
-            result = run_generation(prompt=prompt, **kwargs)
+            result = run_generation_batch(prompts, **kwargs)
         except GenerationCancelled:
             root.after(0, lambda: on_done(None, None, True))
         except Exception as exc:  # noqa: BLE001 - show any failure in GUI
@@ -1810,18 +2025,33 @@ def run_gui(defaults: dict | None = None) -> None:
         seed_raw = seed_var.get().strip()
         seed = int(seed_raw) if seed_raw.lstrip("-").isdigit() else None
         try:
-            temperature = parse_temperature(temp_var.get())
-        except ValueError as exc:
-            messagebox.showerror("Invalid temperature", str(exc))
-            return
-        try:
             count = parse_count(count_var.get())
         except ValueError as exc:
             messagebox.showerror("Invalid count", str(exc))
             return
+        names = current_template_vars()
+        injection_active = count > 1 and bool(names)
+        prompts = [prompt]
+        if injection_active:
+            cells = [[entry.get() for entry in row] for row in injection_entries]
+            if not any((cell or "").strip() for row in cells for cell in row):
+                messagebox.showwarning(
+                    "Injection table empty",
+                    "The prompt has {{variables}} but the Injection table is "
+                    "empty. Fill at least one cell or remove the variables.",
+                )
+                return
+            rows = resolve_injection_rows(cells, names)
+            prompts = [
+                apply_template_values(prompt, dict(zip(names, row)))
+                for row in rows
+            ]
         if count > 1 and not messagebox.askyesno(
             "Confirm multiple generations",
-            f"Generate {count} images with the same prompt and settings?\n\n"
+            f"Generate {count} images "
+            + ("with different prompts (Injection tab)"
+               if injection_active else "with the same prompt and settings")
+            + "?\n\n"
             f"Each image counts as a separate generation and may incur "
             f"additional costs (total \u2248 {count}\u00d7 the single-image cost).\n\n"
             "Continue?",
@@ -1854,13 +2084,11 @@ def run_gui(defaults: dict | None = None) -> None:
             "dry_run": bool(dry_var.get()),
             "summary_model": summary_model,
             "provider": current_provider,
-            "temperature": temperature,
             "cancel_event": threading.Event(),
         }
         state["running"] = True
         state["cancel_event"] = kwargs["cancel_event"]
         state["start"] = time.perf_counter()
-        state["elapsed"] = 0.0
         persist_gui_config()
         gen_btn.configure(state=tk.DISABLED)
         cancel_btn.configure(state=tk.NORMAL)
@@ -1868,7 +2096,7 @@ def run_gui(defaults: dict | None = None) -> None:
         spin.start(50)
         status_var.set("generating...")
         tick_clock()
-        threading.Thread(target=worker, args=(prompt, kwargs), daemon=True).start()
+        threading.Thread(target=worker, args=(prompts, kwargs), daemon=True).start()
 
     def persist_gui_config() -> None:
         try:
@@ -1882,15 +2110,15 @@ def run_gui(defaults: dict | None = None) -> None:
                 "prop": prop_var.get().strip(),
                 "resolution": res_var.get().strip(),
                 "output_format": fmt_var.get().strip(),
-                "temperature": temp_var.get().strip(),
                 "dry_run": bool(dry_var.get()),
             })
         except OSError:
             pass
 
-    gen_btn.configure(command=on_generate)
     cancel_btn.configure(command=on_cancel)
+    gen_btn.configure(command=on_generate)
     refresh_log()
+    refresh_injection_tab()
 
     def on_close() -> None:
         if not state["running"]:
