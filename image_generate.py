@@ -1282,12 +1282,12 @@ def run_gui(defaults: dict | None = None) -> None:
         pass
     root.geometry("860x720")
 
-    # Brand logo (logo.png next to this file): window icon + header.
+    # Brand logo (img/logo.png next to this file): window icon + header.
     # Missing/corrupt file -> plain text header, never blocks startup.
     state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None,
                    "logo_img": None}
     try:
-        _logo_path = Path(__file__).resolve().parent / "logo.png"
+        _logo_path = Path(__file__).resolve().parent / "img/logo.png"
         if _logo_path.is_file():
             _logo = tk.PhotoImage(file=str(_logo_path))
             if _logo.width() > 48 or _logo.height() > 48:

@@ -246,10 +246,10 @@ export default function Generate(p: Props) {
           <div className="composer-actions">
             <button className="ghost" onClick={onCancel} disabled={!running}>Cancel</button>
             <label className="count-pill" title="How many images to generate with the same prompt (natural number 1-10). Above 1 asks for confirmation: each image may add costs.">
-              ×<input type="text" value={countText} inputMode="numeric"
-                onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setCountText(e.target.value) }}
-                disabled={running} aria-label="Image count" />
-            </label>
+            <input type="text" value={countText} inputMode="numeric"
+              onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setCountText(e.target.value) }}
+              disabled={running} aria-label="Image count" />×
+          </label>
             <button className="primary" onClick={onGenerate} disabled={running}>
               {running ? 'Generating…' : 'Generate'}
             </button>

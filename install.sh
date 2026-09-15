@@ -11,7 +11,7 @@ APP_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
 
 mkdir -p "$APP_DIR" "$ICON_DIR"
-cp "$REPO/logo.png" "$ICON_DIR/image-generate.png"
+cp "$REPO/img/logo.png" "$ICON_DIR/image-generate.png"
 
 cat > "$APP_DIR/image-generate.desktop" <<EOF
 [Desktop Entry]
