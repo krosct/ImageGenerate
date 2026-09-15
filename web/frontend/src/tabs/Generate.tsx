@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, listenJob, LogResponse } from '../api'
 
 interface Props {
@@ -22,7 +22,8 @@ interface Props {
   onUsePrompt: (text: string) => void
   prompt: string
   setPrompt: (v: string) => void
-  temperature: string
+  countText: string
+  setCountText: (v: string) => void
 }
 
 function ratioBox(prop: string): { w: number; h: number } | null {
@@ -35,6 +36,32 @@ function ratioBox(prop: string): { w: number; h: number } | null {
   return { w: w * scale, h: h * scale }
 }
 
+function extractTemplateVars(prompt: string): string[] {
+  const seen = new Set<string>()
+  const names: string[] = []
+  for (const m of prompt.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const name = m[1].trim()
+    if (name && !seen.has(name)) {
+      seen.add(name)
+      names.push(name)
+    }
+  }
+  return names
+}
+
+// Empty cell repeats the value above; first row falls back to the variable name.
+function resolveInjectionRows(cells: string[][], names: string[]): string[][] {
+  const previous = names.map(() => '')
+  return cells.map((row) =>
+    names.map((name, j) => {
+      const value = (row[j] ?? '').trim()
+      const resolved = value || previous[j] || name
+      previous[j] = resolved
+      return resolved
+    }),
+  )
+}
+
 export default function Generate(p: Props) {
   const [running, setRunning] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -45,8 +72,27 @@ export default function Generate(p: Props) {
   const [done, setDone] = useState<{ images: string[]; cost: number } | null>(null)
   const [muted, setMuted] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
-  const [countText, setCountText] = useState('1')
+  const [seedText, setSeedText] = useState('')
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [pendingCount, setPendingCount] = useState(1)
+  const [pendingInjection, setPendingInjection] = useState<Record<string, string>[] | undefined>()
+  const [injectionCells, setInjectionCells] = useState<string[][]>([])
   const audioRef = useRef<AudioContext | null>(null)
+
+  const templateVars = useMemo(() => extractTemplateVars(p.prompt), [p.prompt])
+  const countNum = /^[0-9]+$/.test(p.countText.trim()) ? parseInt(p.countText.trim(), 10) : 1
+  const injectionActive = countNum > 1 && templateVars.length > 0
+
+  // Keep the injection table sized to count rows × vars columns, preserving
+  // already typed values.
+  useEffect(() => {
+    setInjectionCells((old) => {
+      if (!injectionActive) return []
+      const next = Array.from({ length: countNum }, (_, i) =>
+        templateVars.map((_, j) => old[i]?.[j] ?? ''))
+      return next
+    })
+  }, [injectionActive, countNum, templateVars])
 
   // Lazily created on the Generate click (a user gesture), so the
   // browser allows playback later when the async job finishes.
@@ -113,32 +159,8 @@ export default function Generate(p: Props) {
     }
   }
 
-  async function onGenerate() {
-    if (!p.prompt.trim()) { setStatus('type a prompt first'); return }
-    if (!p.summaryModel.trim()) { setStatus('fill in Summary model first (Model tab)'); return }
-    const tempRaw = p.temperature.trim()
-    if (tempRaw !== '') {
-      const tempNum = Number(tempRaw)
-      if (!Number.isFinite(tempNum) || tempNum < 0 || tempNum > 2) {
-        setStatus('error: invalid temperature (need a number 0-2, or blank)')
-        return
-      }
-    }
-    if (!/^[0-9]+$/.test(countText.trim())) {
-      setStatus('error: invalid count (need a natural number 1-10)')
-      return
-    }
-    const count = parseInt(countText.trim(), 10)
-    if (count < 1 || count > 10) {
-      setStatus('error: invalid count (need a natural number 1-10)')
-      return
-    }
-    if (count > 1 && !window.confirm(
-      `Generate ${count} images with the same prompt and settings?\n\n` +
-      `Each image counts as a separate generation and may incur additional ` +
-      `costs (total ≈ ${count}× the single-image cost).\n\nContinue?`,
-    )) return
-    ensureAudio() // unlock sound on user gesture; chime plays when done
+  async function startGeneration(count: number, injectionRows?: Record<string, string>[]) {
+    ensureAudio()
     setRunning(true)
     setElapsed(0)
     setDone(null)
@@ -153,8 +175,9 @@ export default function Generate(p: Props) {
         prop: p.prop,
         resolution: p.resolution,
         output_format: p.outputFormat,
-        temperature: tempRaw === '' ? null : tempRaw,
         count,
+        injection: injectionRows ?? [],
+        seed: seedText.trim() === '' ? null : parseInt(seedText.trim(), 10) || null,
         dry_run: p.dryRun,
         api_key: p.apiKey || null,
         remember_key: p.rememberKey,
@@ -184,6 +207,40 @@ export default function Generate(p: Props) {
       setRunning(false)
       setStatus(`error: ${(e as Error).message}`)
     }
+  }
+
+  async function onGenerate() {
+    p.setCountText('1')
+    if (!p.prompt.trim()) { setStatus('type a prompt first'); return }
+    if (!p.summaryModel.trim()) { setStatus('fill in Summary model first (Model tab)'); return }
+    if (!/^[0-9]+$/.test(p.countText.trim())) {
+      setStatus('error: invalid count (need a natural number 1-10)')
+      return
+    }
+    const count = parseInt(p.countText.trim(), 10)
+    if (count < 1 || count > 10) {
+      setStatus('error: invalid count (need a natural number 1-10)')
+      return
+    }
+    let injectionRows: Record<string, string>[] | undefined
+    if (injectionActive) {
+      const filled = injectionCells.some((row) => row.some((c) => c.trim() !== ''))
+      if (!filled) {
+        setStatus('error: the Injection table is empty — fill at least one cell')
+        return
+      }
+      const rows = resolveInjectionRows(injectionCells, templateVars)
+      injectionRows = rows.map((row) =>
+        Object.fromEntries(templateVars.map((name, j) => [name, row[j]])))
+    }
+    if (count > 1 && !confirmOpen) {
+      setPendingCount(count)
+      setPendingInjection(injectionRows)
+      setConfirmOpen(true)
+      return
+    }
+    setConfirmOpen(false)
+    await startGeneration(count, injectionRows)
   }
 
   async function onCancel() {
@@ -239,18 +296,24 @@ export default function Generate(p: Props) {
               {p.outputFormats.map((f) => <option key={f} value={f}>{f}</option>)}
             </select>
           </label>
+          <label className="pill-select" title="Reproducibility seed (integer, optional)">
+            <span>Seed</span>
+            <input type="text" value={seedText} inputMode="numeric"
+              onChange={(e) => { if (/^-?[0-9]*$/.test(e.target.value)) setSeedText(e.target.value) }}
+              disabled={running} aria-label="Seed" style={{ width: 60, padding: '4px 6px', fontSize: 13 }} />
+          </label>
           <label className={`pill-check${p.dryRun ? ' on' : ''}`}
             title="Test run without spending anything: writes a local placeholder instead of calling the paid API.">
             <input type="checkbox" checked={p.dryRun} onChange={(e) => p.setDryRun(e.target.checked)} disabled={running} /> dry-run
           </label>
           <div className="composer-actions">
-            <button className="ghost" onClick={onCancel} disabled={!running}>Cancel</button>
+            <button className="btn-cancel" onClick={onCancel} disabled={!running}>Cancel</button>
             <label className="count-pill" title="How many images to generate with the same prompt (natural number 1-10). Above 1 asks for confirmation: each image may add costs.">
-            <input type="text" value={countText} inputMode="numeric"
-              onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setCountText(e.target.value) }}
+            <input type="text" value={p.countText} inputMode="numeric"
+              onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) p.setCountText(e.target.value) }}
               disabled={running} aria-label="Image count" />×
           </label>
-            <button className="primary" onClick={onGenerate} disabled={running}>
+            <button className="btn-generate" onClick={onGenerate} disabled={running}>
               {running ? 'Generating…' : 'Generate'}
             </button>
           </div>
@@ -272,6 +335,43 @@ export default function Generate(p: Props) {
           </span>
         </div>
       </div>
+
+      {injectionActive && (
+        <div className="card injection-card">
+          <div className="log-head">
+            <h3 className="injection-title">Injection</h3>
+            <span className="hint">
+              one row per generation · empty cell repeats the value above
+              (first row falls back to the variable name)
+            </span>
+          </div>
+          <div className="logwrap">
+            <table className="log injection">
+              <thead>
+                <tr>{templateVars.map((name) => <th key={name}>{name}</th>)}</tr>
+              </thead>
+              <tbody>
+                {injectionCells.map((row, i) => (
+                  <tr key={i}>
+                    {templateVars.map((name, j) => (
+                      <td key={name}>
+                        <input
+                          value={row[j] ?? ''}
+                          onChange={(e) => setInjectionCells((old) =>
+                            old.map((r, ri) =>
+                              ri === i ? r.map((c, ci) => (ci === j ? e.target.value : c)) : r))}
+                          disabled={running}
+                          aria-label={`generation ${i + 1} ${name}`}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {logOpen && (
         <div className="card">
@@ -336,6 +436,22 @@ export default function Generate(p: Props) {
             </div>
             <div style={{ marginTop: 12, textAlign: 'right' }}>
               <button className="primary" onClick={() => setDone(null)}>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmOpen && (
+        <div className="modal-bg" onClick={() => setConfirmOpen(false)}>
+          <div className="modal confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Generate {pendingCount} images{pendingInjection ? ' with different prompts (Injection)' : ''}?</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.55, margin: '8px 0 16px' }}>
+              Each image counts as a separate generation and may incur additional costs<br />
+              (total ≈ {pendingCount}× the single-image cost).
+            </p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn-cancel" onClick={() => { setConfirmOpen(false); p.setCountText('1') }}>Cancel</button>
+              <button className="btn-generate" onClick={() => { setConfirmOpen(false); void startGeneration(pendingCount, pendingInjection) }}>Generate</button>
             </div>
           </div>
         </div>

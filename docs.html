@@ -245,21 +245,37 @@ python3 image_generate.py --list-log                           # mostra o histó
 <p><kbd>Ctrl</kbd>+<kbd>C</kbd> cancela: aborta as conexões, apaga arquivos parciais, não registra nada no log.</p>
 
 <h2 id="gui">GUI (desktop)</h2>
-<p>Janela Tkinter em <strong>3 abas</strong>, só com a biblioteca padrão. Abra com <code class="inline">python3 image_generate.py --gui</code>.</p>
+<p>Janela Tkinter em <strong>3 abas fixas</strong> (Generate, Model, Dir) mais a aba <strong>Injection</strong>, que só aparece quando é útil. Abra com <code class="inline">python3 image_generate.py --gui</code>.</p>
 <table>
 <tr><th>Aba</th><th>Função</th><th>Por quê separada?</th></tr>
 <tr><td>Generate</td><td>Prompt, proporção, resolução, formato, seed, dry-run, botão Generate/Cancel, cronômetro e lista do log</td><td>É o uso diário — fica tudo à mão numa tela só</td></tr>
 <tr><td>Model</td><td>Provedor, modelo de imagem, modelo de resumo, chave + “remember me”/Forget</td><td>Configura-se uma vez e raramente se mexe</td></tr>
 <tr><td>Dir</td><td>Pastas de saída, contexto e memória (+ Browse)</td><td>Caminhos mudam por projeto, não por geração</td></tr>
+<tr><td>Injection <em>(condicional)</em></td><td>Tabela de valores por geração para variáveis <code class="inline">{{nome}}</code> do prompt</td><td>Só existe quando quantidade &gt; 1 e o prompt tem variáveis</td></tr>
 </table>
 <ul>
 <li><strong>Cronômetro:</strong> tempo entre enviar o pedido e receber a imagem (não o tempo total do programa).</li>
 <li><strong>Dicas flutuantes:</strong> passe o mouse sobre os campos — cada um explica o que faz.</li>
 <li><strong>Preview de proporção:</strong> o ⓘ ao lado de “Aspect” desenha o retângulo da proporção escolhida.</li>
 <li><strong>Ícone no dock:</strong> a janela usa <code class="inline">img/logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
-<li><strong>Temperatura (aba Model):</strong> número 0–2, vazio = padrão do provedor; letras/símbolos/fora da faixa bloqueiam a geração com erro.</li>
 <li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 abre confirmação avisando que cada imagem pode somar custo.</li>
 </ul>
+
+<h3 id="gui-injection">Aba Injection (variáveis no prompt)</h3>
+<p>Quando a quantidade é <strong>&gt; 1</strong> e o prompt contém variáveis <code class="inline">{{qualquer texto}}</code>, aparece a aba <strong style="color:#e6c600">Injection</strong> (título em amarelo). Nela há uma tabela com <strong>uma linha por geração</strong> e <strong>uma coluna por variável</strong> — preencha o valor de cada variável em cada geração:</p>
+<pre>prompt: "crie uma imagem de um {{pessoa}} com um {{objeto}}."   ×3
+
+| pessoa | objeto   |
+1| menino | sorvete  |
+2| cavalo | capacete |
+3| carro  | palhaço  |</pre>
+<p>Isso gera 3 requisições: <em>“…um menino com um sorvete”</em>, <em>“…um cavalo com um capacete”</em> e <em>“…um carro com um palhaço”</em>.</p>
+<ul>
+<li><strong>Célula vazia</strong> repete o valor da linha de cima; na primeira linha, usa o próprio nome da variável.</li>
+<li><strong>Tabela totalmente vazia</strong> → alerta e a geração não começa.</li>
+<li>A aba aparece/some sozinha conforme o prompt e a quantidade; cada célula vazia preenchida com repetição é resolvida na hora do Generate.</li>
+</ul>
+<div class="callout tip"><span class="tag">CLI equivalente</span>Na linha de comando use <code class="inline">--inject 'pessoa=menino,objeto=sorvete'</code> — uma opção por geração (a quantidade vira o número de opções). Célula ausente/vazia repete a linha anterior ou o nome da variável. Se o prompt tem <code class="inline">{{variáveis}}</code>, <code class="inline">--count &gt; 1</code> sem <code class="inline">--inject</code> é erro. Na <strong>web</strong>, a tabela Injection aparece no mesmo lugar (abaixo do composer) quando quantidade &gt; 1 e o prompt tem variáveis.</div>
 <p>As preferências da GUI são salvas em <code class="inline">config.json</code> no cofre e restauradas na próxima abertura. Precedência: <strong>padrões &lt; config.json &lt; flags explícitas</strong>.</p>
 
 <h2 id="web">Web (navegador)</h2>
@@ -276,7 +292,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <div class="callout"><span class="tag">Por que o som às vezes não toca?</span>Navegadores bloqueiam áudio sem gesto do usuário. O contexto de áudio é criado no clique do Generate — se a aba estiver mutada ou o autoplay bloqueado, o modal aparece normalmente, só sem som.</div>
 
 <h3 id="web-model">Aba Model</h3>
-<p>Provedor, modelo de imagem, modelo de resumo, <strong>temperatura</strong> (0–2, vazio = padrão) e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
+<p>Provedor, modelo de imagem, modelo de resumo e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
 
 <h3 id="web-dir">Aba Dir + folder picker</h3>
 <p>Cada pasta tem input (digitar/colar) + botão <strong>Browse…</strong>, que abre um modal navegando nas <strong>pastas reais da máquina</strong> (o servidor é local): caminho atual, ⬆ Up, ⌂ Home, lista de subpastas, criar nova pasta e <em>Use this folder</em>.</p>
@@ -360,7 +376,6 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">--api-key / --remember-key / --forget-key</code></td><td>Chave desta vez / guardar no cofre / apagar do cofre</td></tr>
 <tr><td><code class="inline">--summary-model</code></td><td>Chat que resume o prompt (vazio = truncamento local grátis)</td></tr>
 <tr><td><code class="inline">--timeout / --dry-run</code></td><td>Timeout HTTP / placeholder local sem gastar nada</td></tr>
-<tr><td><code class="inline">--temperature</code></td><td>Temperatura 0–2 (vazio = padrão do provedor; não documentado na API de imagens — suporte varia por modelo)</td></tr>
 <tr><td><code class="inline">--gui / --list-log</code></td><td>Abre a GUI / imprime o CSV e sai</td></tr>
 </table>
 
@@ -372,7 +387,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (arquivo único)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI</td></tr>
 <tr><td><code class="inline">web/frontend/src/</code></td><td>React: <code class="inline">App.tsx</code>, <code class="inline">api.ts</code>, <code class="inline">tabs/Generate|Model|Dir.tsx</code></td></tr>
-<tr><td><code class="inline">img/logo.png / logo+titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
+<tr><td><code class="inline">img/logo.png / img/logo+titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
 <tr><td><code class="inline">install.sh</code></td><td>Gera e instala o launcher Linux (o <code class="inline">.desktop</code> é local, ignorado no git)</td></tr>
 <tr><td><code class="inline">docs.html</code></td><td>Esta documentação (arquivo único, sem dependências)</td></tr>
 </table>

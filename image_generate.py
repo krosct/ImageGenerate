@@ -1171,6 +1171,59 @@ def run_generation(
     }
 
 
+def run_generation_batch(prompts: list[str], **kwargs: object) -> dict:
+    """Run one generation per prompt (Injection mode). Aggregates the results.
+
+    kwargs are forwarded to run_generation(); a "count" key is overridden
+    to 1 per prompt. Shares the cancel_event: cancelling aborts the whole
+    batch, removes partial files and logs nothing.
+    """
+    if len(prompts) <= 1:
+        return run_generation(prompt=prompts[0], **kwargs)  # type: ignore[arg-type]
+    images: list[str] = []
+    entries: list[dict] = []
+    total_cost = 0.0
+    total_elapsed = 0.0
+    log_path = ""
+    for one_prompt in prompts:
+        result = run_generation(prompt=one_prompt, **{**kwargs, "count": 1})  # type: ignore[arg-type]
+        images.extend(result["images"])
+        entries.extend(result["entries"])
+        total_cost += result["cost"]
+        total_elapsed += result["elapsed"]
+        log_path = result["log_path"]
+    return {
+        "images": images,
+        "entries": entries,
+        "log_path": log_path,
+        "elapsed": total_elapsed,
+        "cost": total_cost,
+        "total_ops": len(entries),
+        "total_cost": total_cost,
+    }
+
+
+def parse_injection_row(spec: str, var_names: list[str]) -> list[str]:
+    """Parse "name=value,name=value" into a values list ordered by var_names.
+
+    Unknown variable names raise ValueError. Missing variables become "".
+    """
+    values: dict[str, str] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ValueError(f"invalid --inject item: {part!r} (expected name=value)")
+        if name not in var_names:
+            raise ValueError(
+                f"unknown variable {name!r} (prompt variables: {', '.join(var_names)})")
+        values[name] = value.strip()
+    return [values.get(name, "") for name in var_names]
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1196,6 +1249,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-format", default="png", choices=OUTPUT_FORMATS)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--count", "--n", dest="count", type=int, default=1)
+    parser.add_argument("--inject", action="append", default=[],
+                        metavar="NAME=VALUE[,NAME=VALUE…]",
+                        help="Values for {{variables}} in the prompt, one option "
+                             "per generation (implies one generation per option). "
+                             "Example: --inject 'pessoa=menino,objeto=sorvete'. "
+                             "Empty value repeats the previous row / variable name.")
     parser.add_argument("--api-key", default="",
                         help="API key for the provider (else env var, else remembered vault).")
     parser.add_argument("--remember-key", action="store_true",
@@ -1262,6 +1321,30 @@ def main_cli(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    var_names = extract_template_vars(prompt)
+    prompts = [prompt]
+    if args.inject:
+        if not var_names:
+            print("error: --inject given but the prompt has no {{variables}}",
+                  file=sys.stderr)
+            return 2
+        try:
+            cells = [parse_injection_row(spec, var_names) for spec in args.inject]
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not any(cell.strip() for row in cells for cell in row):
+            print("error: all --inject rows are empty", file=sys.stderr)
+            return 2
+        rows = resolve_injection_rows(cells, var_names)
+        prompts = [apply_template_values(prompt, dict(zip(var_names, row)))
+                   for row in rows]
+        count = len(prompts)
+    elif count > 1 and var_names:
+        print("error: prompt has {{variables}} and count > 1: pass one --inject "
+              "'name=value,…' option per generation (or use the GUI Injection tab)",
+              file=sys.stderr)
+        return 2
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     model = args.model or PROVIDERS[provider]["default_model"]
     print(f"[{started}] requesting provider={provider} model={model} "
@@ -1277,8 +1360,8 @@ def main_cli(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGINT, _handle_sigint)
     try:
-        result = run_generation(
-            prompt=prompt,
+        result = run_generation_batch(
+            prompts,
             output_dir=output_dir,
             context_dir=args.context_dir or None,
             memory_dir=args.memory_dir or None,
