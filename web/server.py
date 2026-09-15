@@ -236,12 +236,16 @@ def api_log(output_dir: str | None = None) -> dict:
 
 @app.get("/api/browse")
 def api_browse(path: str | None = None) -> dict:
-    """List subdirectories of a server-side folder (localhost folder picker)."""
+    """List subdirectories of a server-side folder (localhost folder picker).
+    If the path does not exist, walks up to the nearest existing parent."""
     base = Path(path or str(Path.home())).expanduser()
     try:
         current = base.resolve()
     except OSError as exc:
         raise HTTPException(400, f"invalid path: {exc}") from exc
+    # Walk up until we find an existing directory (handles missing leaf dirs)
+    while current != current.parent and not current.exists():
+        current = current.parent
     if not current.exists():
         raise HTTPException(404, "folder not found")
     if not current.is_dir():
