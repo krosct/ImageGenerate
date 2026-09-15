@@ -7,12 +7,12 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 
 - **Gera imagens a partir de prompt** — digite o que quer ver, receba a imagem.
 - **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
-- **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt; confirma o custo antes.
-- **Controla temperatura** — `--temperature 0.7` (0 a 2, vazio = padrão do modelo).
+- **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt.
+- **Controla a temperatura do modelo usado** — `--temperature 0.7`.
 - **Escolhe modelo, proporção, resolução, formato** — `meta/muse-image`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
-- **Salva log com custo** — `log_image_generate.csv` (data, prompt, arquivo, dimensões, custo, modelo, chave por hash).
-- **Funciona offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
-- **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o mesmo `run_generation()`.
+- **Salva log das requisições** — `log_image_generate.csv`.
+- **Teste offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
+- **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o core.
 - **Documentação completa local** — [`docs.html`](docs.html) abre direto no navegador, sem internet.
 
 ---
