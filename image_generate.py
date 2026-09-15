@@ -1690,6 +1690,8 @@ def run_gui(defaults: dict | None = None) -> None:
     def current_template_vars() -> list[str]:
         return extract_template_vars(prompt_text.get("1.0", tk.END))
 
+    injection_names: list[str] = []
+
     def refresh_injection_tab(*_args: object) -> None:
         try:
             count = parse_count(count_var.get())
@@ -1697,9 +1699,13 @@ def run_gui(defaults: dict | None = None) -> None:
             count = 1
         names = current_template_vars()
         active = count > 1 and bool(names)
+        # Preserve typed values across rebuilds (keyed by variable name).
+        old_values = [[entry.get() for entry in row] for row in injection_entries]
+        old_names = list(injection_names)
         for child in tab_injection.winfo_children():
             child.destroy()
         injection_entries.clear()
+        injection_names[:] = names if active else []
         if not active:
             try:
                 notebook.tab(tab_injection, text="Injection")
@@ -1720,8 +1726,10 @@ def run_gui(defaults: dict | None = None) -> None:
                 row=0, column=j, padx=4, pady=2, sticky=tk.EW)
         for i in range(count):
             row_entries: list[ttk.Entry] = []
-            for j in range(len(names)):
+            for j, name in enumerate(names):
                 entry = ttk.Entry(grid, width=24)
+                if name in old_names and i < len(old_values):
+                    entry.insert(0, old_values[i][old_names.index(name)])
                 entry.grid(row=i + 1, column=j, padx=4, pady=2, sticky=tk.EW)
                 row_entries.append(entry)
             injection_entries.append(row_entries)
@@ -1986,31 +1994,7 @@ def run_gui(defaults: dict | None = None) -> None:
 
     def worker(prompts: list[str], kwargs: dict) -> None:
         try:
-            if len(prompts) == 1:
-                result = run_generation(prompt=prompts[0], **kwargs)
-            else:
-                images: list[str] = []
-                entries: list[dict] = []
-                total_cost = 0.0
-                total_elapsed = 0.0
-                log_path = ""
-                for one_prompt in prompts:
-                    result = run_generation(
-                        prompt=one_prompt, **{**kwargs, "count": 1})
-                    images.extend(result["images"])
-                    entries.extend(result["entries"])
-                    total_cost += result["cost"]
-                    total_elapsed += result["elapsed"]
-                    log_path = result["log_path"]
-                result = {
-                    "images": images,
-                    "entries": entries,
-                    "log_path": log_path,
-                    "elapsed": total_elapsed,
-                    "cost": total_cost,
-                    "total_ops": len(entries),
-                    "total_cost": total_cost,
-                }
+            result = run_generation_batch(prompts, **kwargs)
         except GenerationCancelled:
             root.after(0, lambda: on_done(None, None, True))
         except Exception as exc:  # noqa: BLE001 - show any failure in GUI
@@ -2132,6 +2116,7 @@ def run_gui(defaults: dict | None = None) -> None:
             pass
 
     cancel_btn.configure(command=on_cancel)
+    gen_btn.configure(command=on_generate)
     refresh_log()
     refresh_injection_tab()
 
