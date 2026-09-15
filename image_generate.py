@@ -452,7 +452,7 @@ def _extract_message_text(message: dict) -> str:
 
     Reasoning/thinking fields are deliberately ignored: logging them would
     leak chain-of-thought into the CSV instead of the requested summary.
-    If content is empty (e.g. reasoning-only models), fall back to reasoning text."""
+    Empty content yields "" so the caller falls back to local truncation."""
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
@@ -461,16 +461,6 @@ def _extract_message_text(message: dict) -> str:
                  if isinstance(b, dict) and isinstance(b.get("text"), str)]
         if "".join(parts).strip():
             return "\n".join(parts)
-    # Fallback for reasoning-only responses (e.g. openrouter/free)
-    reasoning_details = message.get("reasoning_details") or message.get("reasoning")
-    if isinstance(reasoning_details, list):
-        texts = [d.get("text", "") for d in reasoning_details
-                 if isinstance(d, dict) and isinstance(d.get("text"), str)]
-        joined = " ".join(texts).strip()
-        if joined:
-            return joined
-    if isinstance(reasoning_details, str) and reasoning_details.strip():
-        return reasoning_details.strip()
     return ""
 
 
@@ -482,6 +472,22 @@ _SUMMARY_META_RES = tuple(
     re.compile(pat, re.IGNORECASE) for pat in (
         r"^here'?s\b",
         r"^here is\b",
+        r"^sure\b",
+        r"^of course\b",
+        r"^certainly\b",
+        r"^understood\b",
+        r"^great\b",
+        r"^okay\b",
+        r"^ok\b",
+        r"^the user\b",
+        r"^user\b",
+        r"^you (want|ask|request|said|provided)\b",
+        r"^your (prompt|request|message)\b",
+        r"^this (prompt|request|image|story)\b",
+        r"^i('ll|'m| will| am| have| understand| summarize)\b",
+        r"^as an ai\b",
+        r"^based on\b",
+        r"^to (summarize|create|complete)\b",
         r"^think",
         r"^thought\b",
         r"^analy[sz]",
@@ -489,6 +495,19 @@ _SUMMARY_META_RES = tuple(
         r"^process\s*:",
         r"^\d+\s*[.)]\s",
     )
+)
+_SUMMARY_META_SUBSTRINGS = (
+    "thinking process",
+    "chain of thought",
+    "the user wants",
+    "the user asks",
+    "user wants me",
+    "user asks me",
+    "wants me to",
+    "asks me to",
+    "your prompt",
+    "this prompt",
+    "as an ai",
 )
 
 
@@ -506,10 +525,12 @@ def clean_summary_text(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
             break
     line = line.strip("\"'`*“”‘’").strip()
     line = _SUMMARY_LABEL_RE.sub("", line).strip("\"'`*“”‘’ ").strip()
+    line = re.sub(r"^[\-\*\u2022>\s]+", "", line).strip()
     lowered = line.lower()
     if not line:
         raise ValueError("empty summary from model")
-    if "thinking process" in lowered or any(pat.match(line) for pat in _SUMMARY_META_RES):
+    if (any(sub in lowered for sub in _SUMMARY_META_SUBSTRINGS)
+            or any(pat.match(line) for pat in _SUMMARY_META_RES)):
         raise ValueError("model returned meta commentary instead of a summary")
     one_line = " ".join(line.split())
     if len(one_line) > limit:
