@@ -8,7 +8,7 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 - **Gera imagens a partir de prompt** — digite o que quer ver, receba a imagem.
 - **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
 - **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt.
-- **Controla a temperatura do modelo usado** — `--temperature 0.7`.
+- **Variáveis no prompt (Injection)** — use `{{nome}}` no prompt e preencha os valores por geração: aba amarela **Injection** na GUI/web ou `--inject 'pessoa=menino,objeto=sorvete'` no CLI (uma opção por geração).
 - **Escolhe modelo, proporção, resolução, formato** — `meta/muse-image`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
 - **Salva log das requisições** — `log_image_generate.csv`.
 - **Teste offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
@@ -77,7 +77,13 @@ python3 image_generate.py --prompt "teste" --prop 1:1 --resolution 512 --dry-run
 
 # Com chave
 export OPENROUTER_API_KEY="sk-or-..."
-python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1K --count 3 --temperature 0.7
+python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1K --count 3
+
+# Variáveis no prompt (Injection) — uma opção por geração
+python3 image_generate.py --prompt "crie uma imagem de um {{pessoa}} com um {{objeto}}." \
+  --inject "pessoa=menino,objeto=sorvete" \
+  --inject "pessoa=cavalo,objeto=capacete" \
+  --inject "pessoa=carro,objeto=palhaço"
 
 # Ver histórico
 python3 image_generate.py --list-log
