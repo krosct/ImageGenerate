@@ -583,6 +583,45 @@ def play_chime(kind: str = "success") -> None:
         pass
 
 
+def _summary_instruction(prompt: str) -> str:
+    """Build the single user message asking for the 1-sentence summary.
+
+    Single user-only message (no system role): some free shared-pool
+    providers return null content when a system message is present, and
+    reasoning models leak thinking into ``content`` unless thinking is
+    capped (see ``reasoning`` budget in :func:`summarize_prompt_remote`).
+    The instruction matches the prompt language (PT heuristic, else EN).
+    """
+    if re.search(
+        r"[ãõçâêôáéíóúàü]|"
+        r"\b(uma|para|com|como|historia|história|menina|menino|voce|você|este|esta|"
+        r"isto|isso|não|nao|mais|sobre|entre|quando|onde|storyboard)\b",
+        prompt, re.IGNORECASE,
+    ):
+        return (
+            "Sem conversação, apenas a resposta. Resuma em uma frase de até "
+            f"{MAX_SUMMARY_CHARS} caracteres o texto abaixo, no mesmo idioma dele. "
+            "Responda somente com a frase do resumo, sem explicações, sem "
+            "numeração, sem aspas e sem reticências.\n\n"
+            f"{prompt}"
+        )
+    return (
+        "No conversation, only the answer. Summarize the text below in one "
+        f"sentence of at most {MAX_SUMMARY_CHARS} characters, in the same "
+        "language as the text. Reply with only the summary sentence, no "
+        "explanations, no numbering, no quotes, no ellipsis.\n\n"
+        f"{prompt}"
+    )
+
+
+# Thinking budget for summary calls: reasoning models share one token
+# budget between thinking and answer, so uncapped thinking eats the whole
+# max_tokens and the API returns null/thinking-only content. Proven live
+# against nvidia/nemotron-3-super (64 thinking tokens -> clean answer).
+_SUMMARY_REASONING_BUDGET = 64
+_SUMMARY_MAX_TOKENS = 200
+
+
 def summarize_prompt_remote(
     prompt: str,
     api_key: str,
@@ -590,28 +629,16 @@ def summarize_prompt_remote(
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> str:
-    """Ask a free OpenRouter chat model for a 1-sentence summary of the prompt."""
+    """Ask an OpenRouter chat model for a 1-sentence summary of the prompt."""
     body = {
         "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": (
-                    "You summarize image prompts. Reply with EXACTLY ONE complete "
-                    f"sentence of at most {MAX_SUMMARY_CHARS} characters, no line breaks, "
-                    "in the same language as the image prompt. "
-                    "Output ONLY that sentence and NOTHING else: no thinking process, "
-                    "no reasoning, no analysis, no explanations, no preamble, "
-                    "no labels, no numbering, no quotation marks. "
-                    "Never cut the sentence off and never end with ellipsis. "
-                    "If the prompt is already short, still return a concise single sentence."
-                )}],
-            },
-            {"role": "user",
-             "content": f"{prompt}\n\nOutput only the summary sentence."},
-        ],
-        "max_tokens": 200,
+        "messages": [{"role": "user", "content": _summary_instruction(prompt)}],
+        "max_tokens": _SUMMARY_MAX_TOKENS,
         "temperature": 0.0,
+        # Cap thinking so reasoning models still leave budget for the answer.
+        # Unknown to a provider -> ignored or 4xx -> caller falls back to
+        # truncation, same as any other remote failure.
+        "reasoning": {"max_tokens": _SUMMARY_REASONING_BUDGET},
     }
     status, raw = _post_json(CHAT_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
     if status != 200:

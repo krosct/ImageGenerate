@@ -577,8 +577,31 @@ class SummarizePromptTest(IsolatedEnvMixin):
         body = captured["body"]
         self.assertEqual(body["model"], "free-model")
         self.assertEqual(body["temperature"], 0.0)
-        system_text = json.dumps(body["messages"][0])
-        self.assertIn("EXACTLY ONE", system_text)
+        # User-only shape: no system role (free shared-pool providers
+        # return null content when a system message is present).
+        self.assertEqual(len(body["messages"]), 1)
+        self.assertEqual(body["messages"][0]["role"], "user")
+        self.assertIn("a cat", body["messages"][0]["content"])
+        # Thinking budget: reasoning models share one token budget between
+        # thinking and answer; uncapped thinking eats the whole max_tokens
+        # and the API returns null/thinking-only content (proven live vs
+        # nvidia/nemotron-3-super with budget 64 -> clean answer).
+        self.assertEqual(body["max_tokens"], ig._SUMMARY_MAX_TOKENS)
+        self.assertEqual(body["reasoning"], {"max_tokens": ig._SUMMARY_REASONING_BUDGET})
+
+    def test_summary_instruction_matches_prompt_language(self):
+        pt = ig._summary_instruction("Complete a história da menina dormindo.")
+        self.assertIn("Sem conversação", pt)
+        self.assertIn("Complete a história", pt)
+        en = ig._summary_instruction("A red panda astronaut floating in space.")
+        self.assertIn("No conversation", en)
+        self.assertIn("red panda", en)
+
+    def test_summary_instruction_is_single_user_message(self):
+        for prompt in ["a cat", "uma gata dormindo no sofá"]:
+            text = ig._summary_instruction(prompt)
+            self.assertIn(prompt, text)
+            self.assertNotIn("system", text.lower())
 
     def test_remote_non200_raises(self):
         with mock.patch.object(ig, "_post_json", return_value=(500, "boom")):
