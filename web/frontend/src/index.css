@@ -109,6 +109,9 @@ nav.tabs button {
 
 nav.tabs button:hover { color: var(--text-primary); }
 nav.tabs button.active { background: var(--panel-3); color: var(--text-primary); }
+nav.tabs button.injection-tab { color: #e6c600; }
+nav.tabs button.injection-tab:hover { color: #f5d94a; }
+nav.tabs button.injection-tab.active { background: rgba(230, 198, 0, 0.16); color: #f5d94a; }
 
 /* Help (?) button: same pill language as the tabs */
 .help-btn {

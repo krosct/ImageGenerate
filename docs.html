@@ -275,7 +275,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Tabela totalmente vazia</strong> → alerta e a geração não começa.</li>
 <li>A aba aparece/some sozinha conforme o prompt e a quantidade; cada célula vazia preenchida com repetição é resolvida na hora do Generate.</li>
 </ul>
-<div class="callout tip"><span class="tag">CLI equivalente</span>Na linha de comando use <code class="inline">--inject 'pessoa=menino,objeto=sorvete'</code> — uma opção por geração (a quantidade vira o número de opções). Célula ausente/vazia repete a linha anterior ou o nome da variável. Se o prompt tem <code class="inline">{{variáveis}}</code>, <code class="inline">--count &gt; 1</code> sem <code class="inline">--inject</code> é erro. Na <strong>web</strong>, a tabela Injection aparece no mesmo lugar (abaixo do composer) quando quantidade &gt; 1 e o prompt tem variáveis.</div>
+<div class="callout tip"><span class="tag">CLI equivalente</span>Na linha de comando use <code class="inline">--inject 'pessoa=menino,objeto=sorvete'</code> — uma opção por geração (a quantidade vira o número de opções). Célula ausente/vazia repete a linha anterior ou o nome da variável. Se o prompt tem <code class="inline">{{variáveis}}</code>, <code class="inline">--count &gt; 1</code> sem <code class="inline">--inject</code> é erro. Na <strong>web</strong>, surge a aba <strong style="color:#e6c600">Injection</strong> na barra de abas do topo (mesma condição: quantidade &gt; 1 e variáveis no prompt).</div>
 <p>As preferências da GUI são salvas em <code class="inline">config.json</code> no cofre e restauradas na próxima abertura. Precedência: <strong>padrões &lt; config.json &lt; flags explícitas</strong>.</p>
 
 <h2 id="web">Web (navegador)</h2>

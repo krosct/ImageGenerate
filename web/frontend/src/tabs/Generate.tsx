@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { api, listenJob, LogResponse } from '../api'
+import { extractTemplateVars, parseCountText, resolveInjectionRows } from '../injection'
 
 interface Props {
   outputDir: string
@@ -24,6 +25,8 @@ interface Props {
   setPrompt: (v: string) => void
   countText: string
   setCountText: (v: string) => void
+  injectionCells: string[][]
+  setInjectionCells: (update: (old: string[][]) => string[][]) => void
 }
 
 function ratioBox(prop: string): { w: number; h: number } | null {
@@ -34,32 +37,6 @@ function ratioBox(prop: string): { w: number; h: number } | null {
   if (!(w > 0 && h > 0)) return null
   const scale = Math.min(200 / w, 110 / h)
   return { w: w * scale, h: h * scale }
-}
-
-function extractTemplateVars(prompt: string): string[] {
-  const seen = new Set<string>()
-  const names: string[] = []
-  for (const m of prompt.matchAll(/\{\{([^{}]*)\}\}/g)) {
-    const name = m[1].trim()
-    if (name && !seen.has(name)) {
-      seen.add(name)
-      names.push(name)
-    }
-  }
-  return names
-}
-
-// Empty cell repeats the value above; first row falls back to the variable name.
-function resolveInjectionRows(cells: string[][], names: string[]): string[][] {
-  const previous = names.map(() => '')
-  return cells.map((row) =>
-    names.map((name, j) => {
-      const value = (row[j] ?? '').trim()
-      const resolved = value || previous[j] || name
-      previous[j] = resolved
-      return resolved
-    }),
-  )
 }
 
 export default function Generate(p: Props) {
@@ -76,23 +53,11 @@ export default function Generate(p: Props) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingCount, setPendingCount] = useState(1)
   const [pendingInjection, setPendingInjection] = useState<Record<string, string>[] | undefined>()
-  const [injectionCells, setInjectionCells] = useState<string[][]>([])
   const audioRef = useRef<AudioContext | null>(null)
 
-  const templateVars = useMemo(() => extractTemplateVars(p.prompt), [p.prompt])
-  const countNum = /^[0-9]+$/.test(p.countText.trim()) ? parseInt(p.countText.trim(), 10) : 1
+  const templateVars = extractTemplateVars(p.prompt)
+  const countNum = parseCountText(p.countText)
   const injectionActive = countNum > 1 && templateVars.length > 0
-
-  // Keep the injection table sized to count rows × vars columns, preserving
-  // already typed values.
-  useEffect(() => {
-    setInjectionCells((old) => {
-      if (!injectionActive) return []
-      const next = Array.from({ length: countNum }, (_, i) =>
-        templateVars.map((_, j) => old[i]?.[j] ?? ''))
-      return next
-    })
-  }, [injectionActive, countNum, templateVars])
 
   // Lazily created on the Generate click (a user gesture), so the
   // browser allows playback later when the async job finishes.
@@ -224,12 +189,15 @@ export default function Generate(p: Props) {
     }
     let injectionRows: Record<string, string>[] | undefined
     if (injectionActive) {
-      const filled = injectionCells.some((row) => row.some((c) => c.trim() !== ''))
+      // Size the table to count × vars (the Injection tab renders it lazily).
+      const sized = Array.from({ length: count }, (_, i) =>
+        templateVars.map((_, j) => p.injectionCells[i]?.[j] ?? ''))
+      const filled = sized.some((row) => row.some((c) => c.trim() !== ''))
       if (!filled) {
         setStatus('error: the Injection table is empty — fill at least one cell')
         return
       }
-      const rows = resolveInjectionRows(injectionCells, templateVars)
+      const rows = resolveInjectionRows(sized, templateVars)
       injectionRows = rows.map((row) =>
         Object.fromEntries(templateVars.map((name, j) => [name, row[j]])))
     }
@@ -335,43 +303,6 @@ export default function Generate(p: Props) {
           </span>
         </div>
       </div>
-
-      {injectionActive && (
-        <div className="card injection-card">
-          <div className="log-head">
-            <h3 className="injection-title">Injection</h3>
-            <span className="hint">
-              one row per generation · empty cell repeats the value above
-              (first row falls back to the variable name)
-            </span>
-          </div>
-          <div className="logwrap">
-            <table className="log injection">
-              <thead>
-                <tr>{templateVars.map((name) => <th key={name}>{name}</th>)}</tr>
-              </thead>
-              <tbody>
-                {injectionCells.map((row, i) => (
-                  <tr key={i}>
-                    {templateVars.map((name, j) => (
-                      <td key={name}>
-                        <input
-                          value={row[j] ?? ''}
-                          onChange={(e) => setInjectionCells((old) =>
-                            old.map((r, ri) =>
-                              ri === i ? r.map((c, ci) => (ci === j ? e.target.value : c)) : r))}
-                          disabled={running}
-                          aria-label={`generation ${i + 1} ${name}`}
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       {logOpen && (
         <div className="card">

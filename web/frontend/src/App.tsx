@@ -3,21 +3,25 @@ import { api, AppConfig, ProvidersResponse } from './api'
 import Generate from './tabs/Generate'
 import Model from './tabs/Model'
 import Dir from './tabs/Dir'
+import Injection from './tabs/Injection'
+import { extractTemplateVars, parseCountText } from './injection'
 
 const DEFAULTS: AppConfig = {
   output_dir: '', context_dir: '', memory_dir: '',
   provider: 'openrouter', model: '', summary_model: '',
-  prop: '1:1', resolution: '1K', output_format: 'png', temperature: '', dry_run: false,
+  prop: '1:1', resolution: '1K', output_format: 'png', dry_run: false,
 }
 
 export default function App() {
-  const [tab, setTab] = useState<'generate' | 'model' | 'dir'>('generate')
+  const [tab, setTab] = useState<'generate' | 'model' | 'dir' | 'injection'>('generate')
+  const [injectionCells, setInjectionCells] = useState<string[][]>([])
   const [cfg, setCfg] = useState<AppConfig>(DEFAULTS)
   const [meta, setMeta] = useState<ProvidersResponse | null>(null)
   const [prompt, setPrompt] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [rememberKey, setRememberKey] = useState(false)
   const [notice, setNotice] = useState('')
+  const [countText, setCountText] = useState('1')
 
   useEffect(() => {
     api.providers().then(setMeta).catch(() => setNotice('cannot reach API (is web/server.py running?)'))
@@ -36,6 +40,13 @@ export default function App() {
     setTab('generate')
     setNotice('prompt loaded from log')
   }
+
+  const templateVars = extractTemplateVars(prompt)
+  const injectionVisible = parseCountText(countText) > 1 && templateVars.length > 0
+
+  useEffect(() => {
+    if (tab === 'injection' && !injectionVisible) setTab('generate')
+  }, [tab, injectionVisible])
 
   return (
     <>
@@ -58,6 +69,14 @@ export default function App() {
                 {t[0].toUpperCase() + t.slice(1)}
               </button>
             ))}
+            {injectionVisible && (
+              <button
+                className={`injection-tab${tab === 'injection' ? ' active' : ''}`}
+                onClick={() => setTab('injection')}
+                title="Values for the {{variables}} in the prompt, one row per generation">
+                Injection
+              </button>
+            )}
           </nav>
           <a className="help-btn" href="/help" target="_blank" rel="noreferrer"
             title="Open docs (docs.html)">?</a>
@@ -89,7 +108,14 @@ export default function App() {
           outputFormats={meta?.output_formats ?? ['png']}
           apiKey={apiKey} rememberKey={rememberKey}
           onUsePrompt={usePrompt} prompt={prompt} setPrompt={setPrompt}
-          temperature={cfg.temperature}
+          countText={countText} setCountText={setCountText}
+          injectionCells={injectionCells} setInjectionCells={setInjectionCells}
+        />
+      )}
+      {tab === 'injection' && injectionVisible && (
+        <Injection
+          prompt={prompt} countText={countText}
+          cells={injectionCells} setCells={setInjectionCells}
         />
       )}
       {tab === 'model' && (
@@ -97,7 +123,6 @@ export default function App() {
           provider={cfg.provider} setProvider={(v) => set('provider', v)}
           model={cfg.model} setModel={(v) => set('model', v)}
           summaryModel={cfg.summary_model} setSummaryModel={(v) => set('summary_model', v)}
-          temperature={cfg.temperature} setTemperature={(v) => set('temperature', v)}
           apiKey={apiKey} setApiKey={setApiKey}
           rememberKey={rememberKey} setRememberKey={setRememberKey}
           providers={meta?.providers ?? []} status={setNotice}
