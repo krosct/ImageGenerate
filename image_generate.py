@@ -1980,16 +1980,16 @@ def run_gui(defaults: dict | None = None) -> None:
             return
         if error:
             status_var.set(f"error: {error}")
-            messagebox.showerror("Generation failed", error)
             if not muted_var.get():
                 play_chime("error")
+            messagebox.showerror("Generation failed", error)
         else:
             assert result is not None
             clock_var.set(f"elapsed: {result['elapsed']:.1f}s (done)")
             status_var.set(f"saved {len(result['images'])} image(s) | ${result['cost']:.6f}")
-            show_done_dialog(list(result["images"]))
             if not muted_var.get():
                 play_chime("success")
+            show_done_dialog(list(result["images"]))
         toggle_log(True)
 
     def worker(prompts: list[str], kwargs: dict) -> None:
