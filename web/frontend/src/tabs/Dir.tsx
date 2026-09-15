@@ -103,7 +103,7 @@ function FolderPicker({ initial, title, onPick, onClose }: {
               <span aria-hidden="true">📁</span> {d}
             </button>
           ))}
-          {path && dirs.length === 0 && <div className="hint">Empty folder.</div>}
+          {path && dirs.length === 0 && <div className="hint">No subfolders (folder has files, not folders).</div>}
         </div>
         <div className="pick-row" style={{ marginTop: 10 }}>
           <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
