@@ -31,9 +31,17 @@ export default function Injection(p: Props) {
                   <td key={name}>
                     <input
                       value={p.cells[i]?.[j] ?? ''}
-                      onChange={(e) => p.setCells((old) =>
-                        old.map((r, ri) =>
-                          ri === i ? r.map((c, ci) => (ci === j ? e.target.value : c)) : r))}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        p.setCells((old) => {
+                          // Size the table to count × vars first: the cells
+                          // state starts empty, so map over a sized copy.
+                          const next = Array.from({ length: count }, (_, ri) =>
+                            names.map((_, ci) => old[ri]?.[ci] ?? ''))
+                          next[i][j] = value
+                          return next
+                        })
+                      }}
                       aria-label={`generation ${i + 1} ${name}`}
                     />
                   </td>
