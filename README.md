@@ -2,51 +2,79 @@
 
 Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e referências se precisar → imagem gerada 🖼️
 
+
+# 🎯 Funcionalidade
+
+**Como usar (resumo):**
+
+1. **Escolha a interface:** CLI (`python3 image_generate.py --gui` para desktop, `python3 web/server.py` para navegador, ou apenas flags no terminal).
+2. **Defina o prompt:** digite o que quer ver (ex.: `"um farol à noite"`). Adicione contexto (`--context-dir`) ou referências visuais (`--memory-dir`) se precisar de consistência.
+3. **Ajuste a saída:** escolha proporção (`--prop`), resolução (`--resolution`), formato (`--output-format`) e, se quiser, temperatura (`--temperature 0.7`) e quantidade (`--count 3`).
+4. **Gere:** clique em **Generate** (GUI/Web) ou rode o comando (CLI). Se `count > 1`, confirma o custo adicional.
+5. **Veja o resultado:** a imagem aparece no modal (Web) ou no diálogo (GUI); o caminho está no log (`log_image_generate.csv`) e pode ser copiado.
+6. **Documentação completa:** abra [`docs.html`](docs.html) para instalação detalhada, tutorial OpenRouter, tabela de flags, API do backend e solução de problemas.
+
 ---
 
 # ❓ Como instalar (do zero até pronto)
 
-1. **Instale o Python 3.10+** (Tkinter já vem na maioria das distros).
-2. **Instale a dependência de cofre:** `pip install cryptography` (só se quiser salvar chaves com `remember me`).
-3. **Para a versão web:** `pip install -r web/requirements.txt` (FastAPI + uvicorn) e `cd web/frontend && npm install && npm run build`.
-4. **Para o launcher Linux:** `bash install.sh` (gera o `.desktop` com o ícone `img/logo.png`; abra pelo menu, não pelo terminal, para agrupar no dock corretamente).
-5. **Para a chave:** crie uma conta no [OpenRouter](https://openrouter.ai), vá em **Keys → Create**, copie o `sk-or-...` (aparece uma vez só) e use `--api-key` ou salve com `--remember-key`. Veja o tutorial completo em [`docs.html`](docs.html) (seção **Conta OpenRouter**).
+1. **Instale o Python 3.10+**:
+```bash
+sudo apt update
+sudo apt install python3.11 -y
+```
+
+2. **Instale a dependência de cofre**:
+```bash
+pip install cryptography
+```
+
+3. **Para a versão web**:
+```bash
+pip install -r web/requirements.txt`
+cd web/frontend
+npm install
+npm run build
+```
+
+4. **Para o launcher Linux**:
+Gera o `.desktop`; podendo ser aberto pelo menu.
+```bash
+bash install.sh
+```
 
 ---
 
-# 3 modos de uso em um só lugar, tudo local 🔒
+# 🔒 3 modos de uso em um só lugar, tudo local
 
 ## 🖥️ Versão GUI (Tkinter)
 
+Rode com:
 ```bash
-# GUI desktop
 python3 image_generate.py --gui
 ```
-
-Abra com `python3 image_generate.py --gui`. Três abas: **Generate** (prompt, proporção, resolução, formato, seed, dry-run, botão Generate/Cancel, cronômetro, log), **Model** (provedor, modelo, temperatura 0–2, chave + remember/Forget) e **Dir** (pastas de saída/contexto/memória + Browse). O `?` no topo abre o `docs.html`. A janela usa `img/logo.png` como ícone e `WM_CLASS=ImageGenerate` para agrupar no dock do Ubuntu.
+Ou iniciando **image-generate.desktop** (launcher gerado pelo install.sh).
 
 <p align="center"><img src="img/guitk.png" alt="GUI" width="520" /></p>
 
 ## 🌐 Versão web
 
+Sirva com com `server.py` e acesse em `http://127.0.0.1:8000`.
+
 ```bash
-# Web (mesmo core, interface React + FastAPI)
-pip install -r web/requirements.txt
-cd web/frontend && npm install && npm run build && cd ../..
 python3 web/server.py   # abre http://127.0.0.1:8000
 ```
 
 <p align="center"><img src="img/guiweb.png" alt="Web" width="520" /></p>
 
-Sirva com `python3 web/server.py` (porta 8000, só `127.0.0.1`). Abra `http://127.0.0.1:8000`. Mesmas 3 abas, cronômetro ao vivo, Cancel, som de alerta no modal de sucesso, folder picker nas pastas locais, busca com highlight no conteúdo, logo como marca d'água no fundo. O `?` no topo abre `/help` (o `docs.html`).
-
 ## 🧑‍💻 Versão CLI (terminal)
 
+Exemplos:
 ```bash
 # Básico (sem chave, só dry-run)
 python3 image_generate.py --prompt "teste" --prop 1:1 --resolution 512 --dry-run
 
-# Com chave (OpenRouter)
+# Com chave
 export OPENROUTER_API_KEY="sk-or-..."
 python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1K --count 3 --temperature 0.7
 
@@ -58,10 +86,4 @@ python3 image_generate.py --list-log
 
 # 📚 Documentação completa
 
-O arquivo [`docs.html`](docs.html) é a documentação completa do programa — não precisa de internet, abre direto no navegador. Cobre: instalação, CLI, GUI, Web (Generate/Model/Dir + folder picker), pipeline, provedores, cofre de chaves, contexto/memória, resumo automático, cancelamento, log CSV, tabela da API (`/api/generate`, `/api/browse`, etc.), flags, arquivos/pastas e solução de problemas. Use a busca no topo (case-insensitive, com highlight e contador) para encontrar rapidamente o que precisa.
-
----
-
-# 📝 Direitos reservados
-
-© ImageGenerate — projeto de código aberto. O código (`image_generate.py`, `web/`) está sob a licença do repositório. As imagens geradas pelo usuário pertencem ao usuário (verifique os termos do provedor usado, ex.: OpenRouter). A marca `img/logo.png` e `img/logo-titulo.png` são parte deste projeto. Nenhum segredo (chave de API) é armazenado no repositório — apenas via cofre local (`~/.config/image_generate/`) ou flags.
+O arquivo [`docs.html`](docs.html) é a documentação completa do programa — não precisa de internet, abre direto no navegador. Use a busca no topo para encontrar rapidamente o que precisa.
