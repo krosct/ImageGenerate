@@ -17,6 +17,13 @@ python3 image_generate.py --prompt "a {{animal}}" --dry-run \
   --inject "animal=cat" --inject "animal=dog" --output-dir /tmp/ig-test
 # GUI smoke (needs display): python3 image_generate.py --gui
 # web frontend build: npm run build in web/frontend
+# regression tests (always run the ones for modified/related areas):
+python3 -m unittest discover -s tests -v
+# targeted examples (-k is case-sensitive: pass both cases to cover
+# CamelCase classes and snake_case methods of the changed area):
+python3 -m unittest tests.test_image_generate -v -k Summar -k summary
+python3 -m unittest tests.test_image_generate -v -k Injection -k injection
+python3 -m unittest tests.test_web_server -v -k Generate -k generate
 ```
 
 ## Architecture map (`image_generate.py`)
@@ -39,5 +46,6 @@ python3 image_generate.py --prompt "a {{animal}}" --dry-run \
 - **No secrets in repo**: keys only via `--api-key`, env (`<PROVIDER>_API_KEY`) or vault. Never print/log full keys (`key_hash` only). `__pycache__/` is git-ignored.
 - **GUI ↔ CLI parity**: every GUI action must be doable via CLI flags.
 - **Small, surgical edits**; keep function contracts; `py_compile` + dry-run check after every change.
+- **Regression tests**: after every change, run the tests for the modified/related areas (map Area → test `-k` keyword in the table above, e.g. Injection → `-k injection`, summary → `-k summary`, CSV log → `-k log`, web → `tests.test_web_server`); run the full suite (`discover -s tests`) when touching `run_generation`, provider contracts, or shared helpers.
 - **Cancel semantics**: abort sockets, delete partial files, log nothing, raise `GenerationCancelled`. Summary failures fall back to truncation (never swallow cancellation).
 - Commits: one per cohesive change set, concise message. Never force-push, never touch git config.

@@ -452,7 +452,7 @@ def _extract_message_text(message: dict) -> str:
 
     Reasoning/thinking fields are deliberately ignored: logging them would
     leak chain-of-thought into the CSV instead of the requested summary.
-    If content is empty (e.g. reasoning-only models), fall back to reasoning text."""
+    Empty content yields "" so the caller falls back to local truncation."""
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
@@ -461,16 +461,6 @@ def _extract_message_text(message: dict) -> str:
                  if isinstance(b, dict) and isinstance(b.get("text"), str)]
         if "".join(parts).strip():
             return "\n".join(parts)
-    # Fallback for reasoning-only responses (e.g. openrouter/free)
-    reasoning_details = message.get("reasoning_details") or message.get("reasoning")
-    if isinstance(reasoning_details, list):
-        texts = [d.get("text", "") for d in reasoning_details
-                 if isinstance(d, dict) and isinstance(d.get("text"), str)]
-        joined = " ".join(texts).strip()
-        if joined:
-            return joined
-    if isinstance(reasoning_details, str) and reasoning_details.strip():
-        return reasoning_details.strip()
     return ""
 
 
@@ -482,6 +472,27 @@ _SUMMARY_META_RES = tuple(
     re.compile(pat, re.IGNORECASE) for pat in (
         r"^here'?s\b",
         r"^here is\b",
+        r"^sure\b",
+        r"^of course\b",
+        r"^certainly\b",
+        r"^understood\b",
+        r"^great\b",
+        r"^okay\b",
+        r"^ok\b",
+        r"^the user\b",
+        r"^user\b",
+        r"^you (want|ask|request|said|provided)\b",
+        r"^your (prompt|request|message)\b",
+        r"^this (prompt|request|image|story)\b",
+        r"^i('ll|'m| will| am| have| understand| summarize| need| should| must)\b",
+        r"^we (need|will|should|must|have)\b",
+        r"^let me\b",
+        r"^the task\b",
+        r"^my task\b",
+        r"^the prompt\b",
+        r"^as an ai\b",
+        r"^based on\b",
+        r"^to (summarize|create|complete)\b",
         r"^think",
         r"^thought\b",
         r"^analy[sz]",
@@ -489,6 +500,25 @@ _SUMMARY_META_RES = tuple(
         r"^process\s*:",
         r"^\d+\s*[.)]\s",
     )
+)
+_SUMMARY_META_SUBSTRINGS = (
+    "thinking process",
+    "chain of thought",
+    "the user wants",
+    "the user asks",
+    "user wants me",
+    "user asks me",
+    "wants me to",
+    "asks me to",
+    "your prompt",
+    "this prompt",
+    "the task is",
+    "my task is",
+    "we need to",
+    "i need to",
+    "let me ",
+    "same language as",
+    "as an ai",
 )
 
 
@@ -506,10 +536,12 @@ def clean_summary_text(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
             break
     line = line.strip("\"'`*“”‘’").strip()
     line = _SUMMARY_LABEL_RE.sub("", line).strip("\"'`*“”‘’ ").strip()
+    line = re.sub(r"^[\-\*\u2022>\s]+", "", line).strip()
     lowered = line.lower()
     if not line:
         raise ValueError("empty summary from model")
-    if "thinking process" in lowered or any(pat.match(line) for pat in _SUMMARY_META_RES):
+    if (any(sub in lowered for sub in _SUMMARY_META_SUBSTRINGS)
+            or any(pat.match(line) for pat in _SUMMARY_META_RES)):
         raise ValueError("model returned meta commentary instead of a summary")
     one_line = " ".join(line.split())
     if len(one_line) > limit:
@@ -551,6 +583,45 @@ def play_chime(kind: str = "success") -> None:
         pass
 
 
+def _summary_instruction(prompt: str) -> str:
+    """Build the single user message asking for the 1-sentence summary.
+
+    Single user-only message (no system role): some free shared-pool
+    providers return null content when a system message is present, and
+    reasoning models leak thinking into ``content`` unless thinking is
+    capped (see ``reasoning`` budget in :func:`summarize_prompt_remote`).
+    The instruction matches the prompt language (PT heuristic, else EN).
+    """
+    if re.search(
+        r"[ãõçâêôáéíóúàü]|"
+        r"\b(uma|para|com|como|historia|história|menina|menino|voce|você|este|esta|"
+        r"isto|isso|não|nao|mais|sobre|entre|quando|onde|storyboard)\b",
+        prompt, re.IGNORECASE,
+    ):
+        return (
+            "Sem conversação, apenas a resposta. Resuma em uma frase de até "
+            f"{MAX_SUMMARY_CHARS} caracteres o texto abaixo, no mesmo idioma dele. "
+            "Responda somente com a frase do resumo, sem explicações, sem "
+            "numeração, sem aspas e sem reticências.\n\n"
+            f"{prompt}"
+        )
+    return (
+        "No conversation, only the answer. Summarize the text below in one "
+        f"sentence of at most {MAX_SUMMARY_CHARS} characters, in the same "
+        "language as the text. Reply with only the summary sentence, no "
+        "explanations, no numbering, no quotes, no ellipsis.\n\n"
+        f"{prompt}"
+    )
+
+
+# Thinking budget for summary calls: reasoning models share one token
+# budget between thinking and answer, so uncapped thinking eats the whole
+# max_tokens and the API returns null/thinking-only content. Proven live
+# against nvidia/nemotron-3-super (64 thinking tokens -> clean answer).
+_SUMMARY_REASONING_BUDGET = 64
+_SUMMARY_MAX_TOKENS = 200
+
+
 def summarize_prompt_remote(
     prompt: str,
     api_key: str,
@@ -558,34 +629,25 @@ def summarize_prompt_remote(
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> str:
-    """Ask a free OpenRouter chat model for a 1-sentence summary of the prompt."""
+    """Ask an OpenRouter chat model for a 1-sentence summary of the prompt."""
     body = {
         "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": (
-                    "You summarize image prompts. Reply with EXACTLY ONE complete "
-                    f"sentence of at most {MAX_SUMMARY_CHARS} characters, no line breaks, "
-                    "in the same language as the image prompt. "
-                    "Output ONLY that sentence and NOTHING else: no thinking process, "
-                    "no reasoning, no analysis, no explanations, no preamble, "
-                    "no labels, no numbering, no quotation marks. "
-                    "Never cut the sentence off and never end with ellipsis. "
-                    "If the prompt is already short, still return a concise single sentence."
-                )}],
-            },
-            {"role": "user",
-             "content": f"{prompt}\n\nOutput only the summary sentence."},
-        ],
-        "max_tokens": 200,
+        "messages": [{"role": "user", "content": _summary_instruction(prompt)}],
+        "max_tokens": _SUMMARY_MAX_TOKENS,
         "temperature": 0.0,
+        # Cap thinking so reasoning models still leave budget for the answer.
+        # Unknown to a provider -> ignored or 4xx -> caller falls back to
+        # truncation, same as any other remote failure.
+        "reasoning": {"max_tokens": _SUMMARY_REASONING_BUDGET},
     }
     status, raw = _post_json(CHAT_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
     if status != 200:
         raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
     payload = json.loads(raw)
-    content = _extract_message_text(payload["choices"][0]["message"])
+    message = payload["choices"][0]["message"]
+    if isinstance(message.get("refusal"), str) and message["refusal"].strip():
+        raise ValueError(f"model refused the summary request: {message['refusal'][:200]}")
+    content = _extract_message_text(message)
     return clean_summary_text(content)
 
 
@@ -1569,6 +1631,7 @@ def run_gui(defaults: dict | None = None) -> None:
     attach_help(summary_entry,
                 "Chat model that writes the 1-sentence log summary. "
                 "Tip: use a free or small model (e.g. openrouter/free) so summaries cost nothing. "
+                "Free routers vary per call; on any failure the log falls back to local truncation. "
                 "Required: generation will not start with this field empty.")
     ttk.Label(tab_model, text="API key:").grid(row=3, column=0, sticky=tk.W, padx=4, pady=2)
     key_row = ttk.Frame(tab_model)
