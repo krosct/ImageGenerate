@@ -519,32 +519,32 @@ def clean_summary_text(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
 
 
 def play_chime(kind: str = "success") -> None:
-    """Play a synthesized chime (success = bright, error = low) via aplay."""
+    """Play a short, quiet notification blip (success = high, error = low)."""
     try:
-        notes = [659.25, 880.0] if kind == "success" else [220.0, 164.81]
+        freq = 880.0 if kind == "success" else 220.0
         rate = 44100
-        duration = 0.32
-        gap = 0.16
+        duration = 0.12
+        fade = 0.02
+        peak = 0.12  # keep it subtle: ~12% of full scale
         samples: list[float] = []
-        for freq in notes:
-            t = 0.0
-            while t < duration:
-                samples.append(0.25 * math.sin(2 * math.pi * freq * t))
-                t += 1.0 / rate
-            gap_samples = int(gap * rate)
-            samples.extend([0.0] * gap_samples)
-        max_amp = max(abs(s) for s in samples) if samples else 1.0
-        if max_amp > 0:
-            samples = [int(s / max_amp * 32767) for s in samples]
-        else:
-            samples = [0] * len(samples)
+        t = 0.0
+        while t < duration:
+            amp = peak
+            if t < fade:  # fade in/out to avoid clicks
+                amp *= t / fade
+            elif t > duration - fade:
+                amp *= (duration - t) / fade
+            samples.append(amp * math.sin(2 * math.pi * freq * t))
+            t += 1.0 / rate
+        data = struct.pack("<" + "h" * len(samples),
+                           *(int(s * 32767) for s in samples))
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             path = f.name
         with wave.open(path, "w") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(rate)
-            w.writeframes(struct.pack("<" + "h" * len(samples), *samples))
+            w.writeframes(data)
         subprocess.run(["aplay", "-q", path], capture_output=True)
         os.unlink(path)
     except Exception:
