@@ -311,8 +311,9 @@ python3 image_generate.py --list-log                           # mostra o histó
 <p>Registro em <code class="inline">PROVIDERS</code> + uma função <code class="inline">request_*</code> por provedor, todas com o mesmo contrato <code class="inline">(payload, start_ts, elapsed)</code>.</p>
 <table>
 <tr><th>Provedor</th><th>Modelo padrão</th><th>Variável de ambiente</th><th>Estado</th></tr>
-<tr><td>openrouter</td><td><code class="inline">meta/muse-image</code></td><td><code class="inline">OPENROUTER_API_KEY</code></td><td>Implementado</td></tr>
-<tr><td>gemini</td><td>—</td><td><code class="inline">GEMINI_API_KEY</code></td><td>Placeholder (guarda a chave; falta implementar <code class="inline">request_gemini()</code>)</td></tr>
+<tr><td>openrouter</td><td><code class="inline">meta/muse-image</code></td><td><code class="inline">OPENROUTER_API_KEY</code></td><td>Implementado (qualquer modelo; parâmetros adaptados via capacidades)</td></tr>
+<tr><td>gemini</td><td>—</td><td><code class="inline">GEMINI_API_KEY</code></td><td>Implementado (famílias <code class="inline">gemini-*-image</code> e <code class="inline">imagen-*</code>; referências só em <code class="inline">gemini-*-image</code>)</td></tr>
+<tr><td>openai</td><td><code class="inline">gpt-image-1</code></td><td><code class="inline">OPENAI_API_KEY</code></td><td>Implementado (famílias <code class="inline">gpt-image-*</code> e <code class="inline">dall-e-*</code>; sem seed nem referências)</td></tr>
 </table>
 <p>Proporções: <code class="inline">auto, 1:1, 1:2, 1:4, 1:8, 2:1, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 8:1, 9:16, 16:9, 9:19.5, 19.5:9, 9:20, 20:9, 9:21, 21:9</code>. Resoluções: <code class="inline">512, 1K, 2K, 4K</code>. Formatos: <code class="inline">png, jpeg, webp</code>.</p>
 

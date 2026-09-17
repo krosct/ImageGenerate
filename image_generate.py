@@ -59,6 +59,7 @@ except ImportError:  # optional dependency, only needed for remembered keys
 
 API_URL = "https://openrouter.ai/api/v1/images"
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+IMAGE_MODEL_ENDPOINTS_URL = "https://openrouter.ai/api/v1/images/models/{model}/endpoints"
 DEFAULT_MODEL = "meta/muse-image"
 DEFAULT_PROVIDER = "openrouter"
 LOG_FILENAME = "log_image_generate.csv"
@@ -87,6 +88,7 @@ LOG_FIELDS = [
     "height",
     "resolution_req",
     "aspect_ratio_req",
+    "seed",
     "cost_usd",
     "generation_timestamp",
     "total_seconds",
@@ -121,16 +123,59 @@ PROVIDERS: dict[str, dict] = {
         "env_var": "GEMINI_API_KEY",
         "default_model": "",
     },
+    "openai": {
+        "label": "OpenAI",
+        "env_var": "OPENAI_API_KEY",
+        "default_model": "gpt-image-1",
+    },
 }
+
+
+# Accepted model slug prefixes per direct provider (prefix-based, not an
+# allowlist, so future models of the same families keep working).
+# OpenRouter accepts any slug: capability discovery adapts the request.
+MODEL_PREFIXES: dict[str, tuple[str, ...] | None] = {
+    "openrouter": None,
+    "gemini": ("gemini-", "imagen-"),
+    "openai": ("gpt-image-", "dall-e-"),
+}
+
+
+def _check_model_for_provider(provider: str, model: str) -> str:
+    """Validate the model slug belongs to the provider's families."""
+    clean = model.strip()
+    prefixes = MODEL_PREFIXES.get(provider)
+    if prefixes is not None and not clean:
+        raise ValueError(
+            f"o provider {provider} exige um modelo "
+            f"(ex.: {', '.join(_model_examples(provider))})"
+        )
+    if prefixes is not None and clean and not clean.startswith(prefixes):
+        raise ValueError(
+            f"modelo {clean!r} não parece ser do provider {provider} "
+            f"(esperado: {', '.join(_model_examples(provider))}); "
+            f"troque de provider ou de modelo"
+        )
+    return clean
+
+
+def _model_examples(provider: str) -> list[str]:
+    return {
+        "gemini": ["gemini-2.5-flash-image", "imagen-4.0-generate-001"],
+        "openai": ["gpt-image-1", "dall-e-3"],
+    }.get(provider, [])
 
 
 def normalize_provider(name: str) -> str:
     """Lowercase provider slug restricted to safe chars (used in file names)."""
     slug = name.strip().lower()
     if not slug or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
-        raise ValueError(f"invalid provider name: {name!r}")
+        raise ValueError(f"nome de provider inválido: {name!r}")
     if slug not in PROVIDERS:
-        raise ValueError(f"unknown provider: {slug!r} (known: {sorted(PROVIDERS)})")
+        raise ValueError(
+            f"provider desconhecido: {slug!r} "
+            f"(suportados: {sorted(PROVIDERS)}; nada foi improvisado)"
+        )
     return slug
 
 
@@ -386,14 +431,20 @@ def load_memory_references(memory_dir: str | None, limit: int = 16) -> list[dict
     return refs
 
 
-def build_final_prompt(base_prompt: str, context_text: str, prop: str, resolution: str) -> str:
-    """Append context and output-size instruction to the user prompt."""
+def build_final_prompt(base_prompt: str, context_text: str, prop: str, resolution: str,
+                       caps: dict | None = None) -> str:
+    """Append context and output-size instruction to the user prompt.
+
+    The size sentences are a fallback hint: when caps confirm the API
+    already carries that parameter, the sentence is skipped (less prompt
+    pollution, smaller content-filter surface).
+    """
     chunks = [base_prompt.strip()]
     if context_text:
         chunks.append(f"Context:\n{context_text}")
-    if prop and prop != "auto":
+    if prop and prop != "auto" and (caps is None or "aspect_ratio" not in caps):
         chunks.append(f"Generate the image with aspect ratio {prop}.")
-    if resolution:
+    if resolution and (caps is None or "resolution" not in caps):
         chunks.append(f"Generate the image at resolution tier {resolution}.")
     return "\n\n".join(c for c in chunks if c)
 
@@ -869,11 +920,369 @@ def _post_json(
             pass
 
 
+def _fetch_json(
+    url: str,
+    headers: dict,
+    timeout_s: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[int, str]:
+    """GET JSON (capability discovery) with the same cancel semantics as _post_json."""
+    parts = urllib.parse.urlsplit(url)
+    conn_cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    default_port = 443 if parts.scheme == "https" else 80
+    conn = conn_cls(parts.hostname or "", parts.port or default_port, timeout=timeout_s)
+    with _HTTP_LOCK:
+        _HTTP_CONNS.add(conn)
+    try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled("generation cancelled")
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled("generation cancelled")
+        return resp.status, raw
+    except (OSError, http.client.HTTPException) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled("generation cancelled") from exc
+        raise
+    finally:
+        with _HTTP_LOCK:
+            _HTTP_CONNS.discard(conn)
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Provider request functions (one per provider, same input/output contract)
 # Each returns (payload, start_ts, elapsed_s) where payload has:
 #   data: [{b64_json, media_type?}], usage: {cost?}, created
 # ---------------------------------------------------------------------------
+
+class ContentPolicyError(RuntimeError):
+    """Raised when the provider blocks the prompt via content filter (HTTP 400)."""
+
+
+_CONTENT_POLICY_MARKERS = (
+    "content management policy",
+    "content_policy",
+    "content policy",
+    "content filter",
+    "filtered due to the prompt",
+    "triggering our content",
+    "moderation",
+    "guardrail",
+    "refusal",
+    "refused",
+    "moderation_blocked",
+    "content_policy_violation",
+    "prohibited_content",
+)
+
+
+def _is_content_policy_refusal(status: int, raw: str) -> bool:
+    """Detect provider content-filter rejections (HTTP 400 + filter wording)."""
+    if status != 400:
+        return False
+    lowered = (raw or "").lower()
+    return any(marker in lowered for marker in _CONTENT_POLICY_MARKERS)
+
+
+_CAPABILITY_MISMATCH_MARKERS = (
+    "supports the requested parameter",
+    "filter by image capabilities",
+)
+
+
+def _is_capability_mismatch(status: int, raw: str) -> bool:
+    """Detect router rejections for parameters no endpoint supports (HTTP 400)."""
+    if status != 400:
+        return False
+    lowered = (raw or "").lower()
+    return any(marker in lowered for marker in _CAPABILITY_MISMATCH_MARKERS)
+
+
+def _content_policy_message(model: str, prompt: str, status: int, raw: str,
+                            ref_count: int, provider_label: str = "") -> str:
+    """Build a user-facing (pt-BR) message for content-filter blocks."""
+    provider_name = provider_label or "unknown"
+    provider_detail = raw[:500].strip()
+    try:
+        error_obj = json.loads(raw).get("error", {})
+        if isinstance(error_obj, dict):
+            meta = error_obj.get("metadata", {})
+            if isinstance(meta, dict) and meta.get("provider_name"):
+                provider_name = str(meta["provider_name"])
+            if isinstance(error_obj.get("message"), str) and error_obj["message"].strip():
+                provider_detail = error_obj["message"].strip()[:500]
+    except (ValueError, AttributeError):
+        pass
+    preview = " ".join((prompt or "").strip().split())[:300] or "(empty)"
+    extras = ""
+    if ref_count:
+        extras = f" (+{ref_count} reference image(s) from Memory dir)"
+    return (
+        f"O provedor bloqueou o prompt por filtro de conteudo "
+        f"(OpenRouter HTTP {status}, provider {provider_name}, model {model}). "
+        f"Mesmo prompts simples podem ser barrados quando Context/Memory "
+        f"adicionam texto ou imagens ocultas ao prompt final{extras}. "
+        f"Prompt enviado (inicio): \"{preview}\". "
+        f"O que tentar: 1) simplifique o prompt; "
+        f"2) limpe Context dir e Memory dir e teste de novo; "
+        f"3) rode com --dry-run para validar o fluxo; "
+        f"4) troque de modelo/provedor; 5) tente mais tarde. "
+        f"Detalhe do provedor: {provider_detail}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model capability discovery (makes the app agnostic to the image model)
+# ---------------------------------------------------------------------------
+
+CAPS_TIMEOUT_S = 15
+_CAPS_CACHE: dict[str, dict | None] = {}
+_CAPS_LOCK = threading.Lock()
+
+
+def _model_capabilities(
+    model: str,
+    api_key: str,
+    cancel_event: threading.Event | None = None,
+    refresh: bool = False,
+) -> dict | None:
+    """Fetch (and cache) the model's supported_parameters from OpenRouter.
+
+    Merges every endpoint via intersection, so the adapted request is
+    accepted no matter which endpoint the router picks. Returns None when
+    the model is unknown or the discovery call fails: callers then send
+    the request unchanged (best effort). Cancel propagates and nothing
+    is cached on cancellation.
+    """
+    key = model.strip()
+    with _CAPS_LOCK:
+        if not refresh and key in _CAPS_CACHE:
+            return _CAPS_CACHE[key]
+    url = IMAGE_MODEL_ENDPOINTS_URL.format(model=urllib.parse.quote(key, safe=""))
+    headers = _openrouter_headers(api_key)
+    caps: dict | None
+    try:
+        status, raw = _fetch_json(url, headers, CAPS_TIMEOUT_S, cancel_event)
+        if status != 200:
+            caps = None
+        else:
+            endpoints = json.loads(raw).get("endpoints") or []
+            param_sets: list[dict] = []
+            for ep in endpoints:
+                params = ep.get("supported_parameters") if isinstance(ep, dict) else None
+                if isinstance(params, dict):
+                    param_sets.append(params)
+            caps = _intersect_capabilities(param_sets) or None
+    except (OSError, http.client.HTTPException, ValueError):
+        caps = None
+    with _CAPS_LOCK:
+        _CAPS_CACHE[key] = caps
+    return caps
+
+
+def _intersect_capabilities(param_sets: list[dict]) -> dict:
+    """Intersect supported_parameters across endpoints (conservative merge)."""
+    if not param_sets:
+        return {}
+    merged: dict = dict(param_sets[0])
+    for params in param_sets[1:]:
+        for name in list(merged):
+            if name not in params:
+                del merged[name]
+                continue
+            merged[name] = _intersect_descriptors(merged[name], params[name])
+            if merged[name] is None:
+                del merged[name]
+    return merged
+
+
+def _intersect_descriptors(first: object, second: object) -> dict | None:
+    """Intersect two capability descriptors; None when incompatible."""
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return first if isinstance(first, dict) else None
+    if first.get("type") != second.get("type"):
+        return None
+    kind = first.get("type")
+    if kind == "enum":
+        values = [v for v in first.get("values", []) if v in (second.get("values") or [])]
+        return {"type": "enum", "values": values} if values else None
+    if kind == "range":
+        try:
+            lo = max(int(first.get("min", 1)), int(second.get("min", 1)))
+            hi = min(int(first.get("max", lo)), int(second.get("max", lo)))
+        except (TypeError, ValueError):
+            return None
+        return {"type": "range", "min": lo, "max": hi} if hi >= lo else None
+    return first
+
+
+def _cap_values(caps: dict, name: str) -> list[str] | None:
+    """Enum values for a parameter, or None when absent/not an enum."""
+    desc = caps.get(name)
+    if isinstance(desc, dict) and desc.get("type") == "enum":
+        values = desc.get("values")
+        if isinstance(values, list) and values:
+            return [str(v) for v in values]
+    return None
+
+
+def _cap_max(caps: dict, name: str) -> int | None:
+    """Upper bound for a range parameter, or None when unbounded/unknown."""
+    desc = caps.get(name)
+    if isinstance(desc, dict) and desc.get("type") == "range":
+        try:
+            return max(1, int(desc.get("max", 1)))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _parse_ratio(text: str) -> float | None:
+    """Parse "W:H" into a float ratio, or None when not numeric."""
+    try:
+        left, right = (float(x) for x in text.replace(" ", "").split(":", 1))
+    except ValueError:
+        return None
+    if left <= 0 or right <= 0:
+        return None
+    return left / right
+
+
+def _closest_ratio(requested: str, values: list[str]) -> str | None:
+    """Supported ratio closest to the requested one (log-distance), else None."""
+    if requested in values:
+        return requested
+    target = _parse_ratio(requested)
+    if target is None:
+        return None
+    best: str | None = None
+    best_diff = float("inf")
+    for value in values:
+        candidate = _parse_ratio(value)
+        if candidate is None:
+            continue
+        diff = abs(math.log(target / candidate))
+        if diff < best_diff:
+            best, best_diff = value, diff
+    return best
+
+
+def _adapt_image_body(body: dict, caps: dict | None) -> dict:
+    """Trim/adjust request fields to what the model endpoint supports."""
+    if not caps:
+        return body
+    adapted = dict(body)
+    if "resolution" not in caps:
+        adapted.pop("resolution", None)
+    else:
+        values = _cap_values(caps, "resolution")
+        if values and adapted.get("resolution") not in values:
+            adapted.pop("resolution", None)
+    if "aspect_ratio" not in caps:
+        adapted.pop("aspect_ratio", None)
+    else:
+        values = _cap_values(caps, "aspect_ratio")
+        requested = adapted.get("aspect_ratio")
+        if values and requested:
+            closest = _closest_ratio(str(requested), values)
+            if closest:
+                adapted["aspect_ratio"] = closest
+            else:
+                adapted.pop("aspect_ratio", None)
+    if "output_format" not in caps:
+        adapted.pop("output_format", None)
+    else:
+        values = _cap_values(caps, "output_format")
+        if values and adapted.get("output_format") not in values:
+            adapted["output_format"] = values[0]
+    if "seed" not in caps:
+        adapted.pop("seed", None)
+    if "n" not in caps:
+        adapted.pop("n", None)
+    refs = adapted.get("input_references")
+    if refs:
+        if "input_references" not in caps:
+            adapted.pop("input_references", None)
+            print(f"warning: model {body.get('model', '')!r} does not support "
+                  "input_references; memory dir images were ignored",
+                  file=sys.stderr)
+        else:
+            max_refs = _cap_max(caps, "input_references")
+            if max_refs and len(refs) > max_refs:
+                adapted["input_references"] = refs[:max_refs]
+    return adapted
+
+
+def _merge_payload(merged: dict, payload: dict) -> dict:
+    """Merge one more single-request payload into the accumulated result."""
+    merged.setdefault("data", []).extend(payload.get("data") or [])
+    merged_usage = merged.get("usage")
+    payload_usage = payload.get("usage")
+    if isinstance(merged_usage, dict) and isinstance(payload_usage, dict):
+        try:
+            merged_usage["cost"] = (float(merged_usage.get("cost") or 0)
+                                    + float(payload_usage.get("cost") or 0))
+        except (TypeError, ValueError):
+            pass
+    return merged
+
+
+def _fan_out_requests(count, per_call, call):
+    """Call call(n, call_index) until count images are received.
+
+    call returns (payload, effective_seed); the index lets adapters vary
+    the seed per call (seed+i) so repeated n=1 requests still vary.
+    Returns (merged_payload, effective_seeds) trimmed to count. An empty
+    response stops the loop (avoids spinning forever). At most count calls.
+    """
+    merged: dict | None = None
+    seeds: list = []
+    received = 0
+    calls = 0
+    total = max(1, count)
+    while received < total and calls < total:
+        n = max(1, min(max(1, per_call), total - received))
+        payload, effective_seed = call(n, calls)
+        items = payload.get("data") or []
+        seeds.extend([effective_seed] * len(items))
+        received += len(items)
+        merged = payload if merged is None else _merge_payload(merged, payload)
+        calls += 1
+        if not items:
+            break
+    assert merged is not None
+    merged["data"] = (merged.get("data") or [])[:total]
+    merged["seeds"] = seeds[:total]
+    return merged, merged["seeds"]
+
+
+def _bearer_headers(api_key: str) -> dict:
+    """Minimal JSON headers for direct provider APIs (no router metadata)."""
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _split_data_url(url: str) -> tuple[str, str] | None:
+    """Split a data: URL into (mime_type, b64) for native image inputs."""
+    if not url.startswith("data:"):
+        return None
+    header, _, b64 = url.partition(",")
+    if not b64 or ";base64" not in header:
+        return None
+    return header[5:].split(";")[0] or "image/png", b64
+
 
 def request_openrouter(
     *,
@@ -889,8 +1298,17 @@ def request_openrouter(
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
-    """POST to OpenRouter images API. Returns (payload, start_ts, elapsed_s)."""
-    body: dict = {
+    """POST to OpenRouter images API. Returns (payload, start_ts, elapsed_s).
+
+    Model-agnostic: the request body is adapted to the model's capabilities
+    (unsupported params dropped, enums/ranges clamped). Providers that only
+    accept n=1 are called repeatedly (seed varied per call) and their
+    payloads merged, so the requested image count is honored for any model.
+    On a capability-mismatch 400, capabilities are refreshed and the
+    adapted request retried once. payload["seeds"] holds the effective
+    seed used per returned image (None when the model got no seed).
+    """
+    base: dict = {
         "model": model,
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
@@ -899,17 +1317,228 @@ def request_openrouter(
         "n": count,
     }
     if references:
-        body["input_references"] = references
+        base["input_references"] = references
     if seed is not None:
-        body["seed"] = seed
+        base["seed"] = seed
     start = time.perf_counter()
     start_ts = time.time()
-    status, raw = _post_json(API_URL, body, _openrouter_headers(api_key), timeout_s, cancel_event)
-    elapsed = time.perf_counter() - start
-    if status != 200:
-        raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
-    payload = json.loads(raw)
-    return payload, start_ts, elapsed
+    headers = _openrouter_headers(api_key)
+    caps = _model_capabilities(model, api_key, cancel_event)
+    last_error: Exception | None = None
+    for attempt in (0, 1):
+        body = _adapt_image_body(dict(base), caps)
+        send_seed = seed is not None and "seed" in body
+        max_n = _cap_max(caps, "n") if caps else None
+        if max_n is None:
+            max_n = int(body.get("n", 1) or 1)
+
+        def single(n: int, index: int) -> tuple[dict, int | None]:
+            one = dict(body)
+            if "n" in one:
+                one["n"] = n
+            effective = seed + index if send_seed and seed is not None else None
+            if send_seed:
+                one["seed"] = effective
+            else:
+                one.pop("seed", None)
+            status, raw = _post_json(API_URL, one, headers, timeout_s, cancel_event)
+            if status != 200:
+                if _is_content_policy_refusal(status, raw):
+                    ref_count = len(one.get("input_references") or [])
+                    raise ContentPolicyError(
+                        _content_policy_message(model, prompt, status, raw, ref_count)
+                    )
+                raise RuntimeError(f"OpenRouter HTTP {status}: {raw[:2000]}")
+            return json.loads(raw), effective
+
+        try:
+            merged, _seeds = _fan_out_requests(count, max_n, single)
+            elapsed = time.perf_counter() - start
+            return merged, start_ts, elapsed
+        except RuntimeError as exc:
+            if (isinstance(exc, ContentPolicyError) or attempt == 1
+                    or not _is_capability_mismatch(400, str(exc))):
+                raise
+            last_error = exc
+            caps = _model_capabilities(model, api_key, cancel_event, refresh=True)
+            if not caps:
+                raise last_error
+    assert last_error is not None  # loop always returns or raises above
+    raise last_error
+
+
+OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+GEMINI_GENERATE_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                       "{model}:generateContent")
+GEMINI_PREDICT_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                      "{model}:predict")
+
+OPENAI_GPT_PREFIX = "gpt-image-"
+OPENAI_DALLE3_PREFIX = "dall-e-3"
+OPENAI_DALLE2_PREFIX = "dall-e-2"
+
+GEMINI_NATIVE_PREFIX = "gemini-"
+GEMINI_IMAGEN_PREFIX = "imagen-"
+GEMINI_ASPECTS = ["1:1", "3:4", "4:3", "9:16", "16:9"]
+GEMINI_SIZES = {"512": "1K", "1K": "1K", "2K": "2K", "4K": "4K"}
+IMAGEN_SIZES = {"512": "1K", "1K": "1K", "2K": "2K", "4K": "2K"}
+
+
+def _gemini_headers(api_key: str) -> dict:
+    return {
+        "x-goog-api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _openai_size(aspect_ratio: str, model: str) -> str:
+    """Map aspect ratio to an OpenAI size string for the model family."""
+    ratio = _parse_ratio(aspect_ratio)
+    landscape = ratio is not None and ratio > 1.05
+    portrait = ratio is not None and ratio < 1 / 1.05
+    if model.startswith(OPENAI_DALLE3_PREFIX):
+        if landscape:
+            return "1792x1024"
+        if portrait:
+            return "1024x1792"
+        return "1024x1024"
+    if model.startswith(OPENAI_DALLE2_PREFIX):
+        return "1024x1024"
+    if landscape:
+        return "1536x1024"
+    if portrait:
+        return "1024x1536"
+    return "1024x1024"
+
+
+def request_openai(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    aspect_ratio: str,
+    resolution: str,
+    references: list[dict],
+    output_format: str,
+    seed: int | None,
+    count: int,
+    timeout_s: int,
+    cancel_event: threading.Event | None = None,
+) -> tuple[dict, float, float]:
+    """POST to the OpenAI Images API. Returns (payload, start_ts, elapsed_s).
+
+    The generations endpoint is text-only: reference images are rejected
+    with an informative error (no improvisation). OpenAI has no seed
+    parameter, so a requested seed is dropped (stderr note). dall-e-3
+    only accepts n=1: extra images are fetched via repeated calls with
+    the payloads merged. payload["seeds"] is all None (model got no seed).
+    """
+    model = _check_model_for_provider("openai", model)
+    if not api_key:
+        raise RuntimeError(
+            "missing openai API key (set OPENAI_API_KEY, use --api-key, "
+            "or save it with --provider openai --remember-key)"
+        )
+    if references:
+        raise RuntimeError(
+            f"modelo {model!r} via OpenAI (generations) não aceita imagens de "
+            "referência; limpe Memory dir ou use outro provider/modelo"
+        )
+    if seed is not None:
+        print(f"warning: modelo {model!r} via OpenAI não suporta seed; "
+              "a seed pedida foi ignorada", file=sys.stderr)
+    per_call = 1 if model.startswith(OPENAI_DALLE3_PREFIX) else max(1, count)
+    body: dict = {
+        "model": model,
+        "prompt": prompt,
+        "n": min(per_call, max(1, count)),
+        "size": _openai_size(aspect_ratio, model),
+    }
+    if model.startswith(OPENAI_GPT_PREFIX):
+        if output_format in ("png", "jpeg", "webp"):
+            body["output_format"] = output_format
+        body["quality"] = {"512": "low", "1K": "medium",
+                           "2K": "high", "4K": "high"}.get(resolution, "auto")
+    elif model.startswith(OPENAI_DALLE3_PREFIX):
+        body["response_format"] = "b64_json"
+        body["quality"] = "hd" if resolution in ("2K", "4K") else "standard"
+    elif model.startswith(OPENAI_DALLE2_PREFIX):
+        body["response_format"] = "b64_json"
+    headers = _bearer_headers(api_key)
+    start = time.perf_counter()
+    start_ts = time.time()
+
+    def single(n: int, _index: int) -> tuple[dict, None]:
+        one = dict(body)
+        one["n"] = n
+        status, raw = _post_json(OPENAI_IMAGES_URL, one, headers, timeout_s, cancel_event)
+        if status != 200:
+            if _is_content_policy_refusal(status, raw):
+                raise ContentPolicyError(
+                    _content_policy_message(model, prompt, status, raw, 0,
+                                            provider_label="OpenAI")
+                )
+            raise RuntimeError(f"OpenAI HTTP {status}: {raw[:2000]}")
+        payload = json.loads(raw)
+        items = []
+        for item in payload.get("data") or []:
+            if isinstance(item, dict) and item.get("b64_json"):
+                items.append({"b64_json": item["b64_json"]})
+        if (payload.get("data") or []) and not items:
+            raise RuntimeError(
+                "OpenAI returned no image bytes (only URLs); "
+                "use a gpt-image model or report this as a bug"
+            )
+        payload["data"] = items
+        return payload, None
+
+    merged, seeds = _fan_out_requests(count, per_call, single)
+    return merged, start_ts, time.perf_counter() - start
+
+
+def _gemini_image_parts(prompt: str, references: list[dict]) -> list[dict]:
+    """Build generateContent parts (text + inlineData reference images)."""
+    parts: list[dict] = [{"text": prompt}]
+    for ref in references:
+        try:
+            url = ref["image_url"]["url"]
+        except (KeyError, TypeError):
+            continue
+        split = _split_data_url(url)
+        if split is None:
+            print("warning: skipping a non-data reference image "
+                  "(Gemini needs data: URLs)", file=sys.stderr)
+            continue
+        mime, b64 = split
+        parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+    return parts
+
+
+def _gemini_parse_images(payload: dict, model: str) -> list[dict]:
+    """Extract shared-contract image items from a generateContent response."""
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        feedback = payload.get("promptFeedback") or {}
+        reason = feedback.get("blockReason", "") if isinstance(feedback, dict) else ""
+        if reason:
+            raise ContentPolicyError(
+                f"O provedor bloqueou o prompt por filtro de conteudo "
+                f"(Google, model {model}). O que tentar: 1) simplifique o prompt; "
+                f"2) limpe Context dir e Memory dir e teste de novo; "
+                f"3) rode com --dry-run para validar o fluxo. "
+                f"Detalhe do provedor: blockReason={reason}"
+            )
+        raise RuntimeError(f"Gemini returned no candidates: {str(payload)[:500]}")
+    items = []
+    for part in (candidates[0].get("content") or {}).get("parts") or []:
+        inline = part.get("inlineData") if isinstance(part, dict) else None
+        if isinstance(inline, dict) and inline.get("data"):
+            item: dict = {"b64_json": inline["data"]}
+            if inline.get("mimeType"):
+                item["media_type"] = inline["mimeType"]
+            items.append(item)
+    return items
 
 
 def request_gemini(
@@ -926,21 +1555,108 @@ def request_gemini(
     timeout_s: int,
     cancel_event: threading.Event | None = None,
 ) -> tuple[dict, float, float]:
-    """Gemini image request (not implemented yet).
+    """POST to the Gemini/Imagen native APIs. Returns (payload, start_ts, elapsed_s).
 
-    Placeholder keeping the provider registry uniform: add the real call to
-    the Generative Language API here and return the shared payload contract.
+    gemini-* models use generateContent (imageConfig, inlineData refs, one
+    image per call, no seed support); imagen-* models use :predict
+    (numberOfImages up to 4, seed supported, no reference input).
+    payload["seeds"] holds the effective seed per image (None when unused).
     """
-    raise NotImplementedError(
-        "gemini provider is not implemented yet: store the key with "
-        "--provider gemini --remember-key, then implement request_gemini() "
-        "for the Generative Language API image endpoint."
-    )
+    model = _check_model_for_provider("gemini", model)
+    if not api_key:
+        raise RuntimeError(
+            "missing gemini API key (set GEMINI_API_KEY, use --api-key, "
+            "or save it with --provider gemini --remember-key)"
+        )
+    _ = output_format
+    headers = _gemini_headers(api_key)
+    start = time.perf_counter()
+    start_ts = time.time()
+    if model.startswith(GEMINI_IMAGEN_PREFIX):
+        if references:
+            raise RuntimeError(
+                f"modelo {model!r} via Gemini (:predict) não aceita imagens de "
+                "referência; limpe Memory dir ou use um modelo gemini-*-image"
+            )
+        url = GEMINI_PREDICT_URL.format(model=urllib.parse.quote(model, safe=""))
+        closest = _closest_ratio(aspect_ratio, GEMINI_ASPECTS) or "1:1"
+        base: dict = {
+            "instances": [{"prompt": prompt}],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": closest,
+                "sampleImageSize": IMAGEN_SIZES.get(resolution, "1K"),
+            },
+        }
+        send_seed = seed is not None
+        per_call = 4
+
+        def single_predict(n: int, index: int) -> tuple[dict, int | None]:
+            one = {"instances": base["instances"],
+                   "parameters": dict(base["parameters"], sampleCount=n)}
+            effective = seed + index if send_seed and seed is not None else None
+            if send_seed:
+                one["parameters"]["seed"] = effective
+            status, raw = _post_json(url, one, headers, timeout_s, cancel_event)
+            if status != 200:
+                if _is_content_policy_refusal(status, raw):
+                    raise ContentPolicyError(
+                        _content_policy_message(model, prompt, status, raw, 0,
+                                                provider_label="Google")
+                    )
+                raise RuntimeError(f"Gemini HTTP {status}: {raw[:2000]}")
+            payload = json.loads(raw)
+            items = []
+            for pred in payload.get("predictions") or []:
+                if isinstance(pred, dict) and pred.get("bytesBase64Encoded"):
+                    item = {"b64_json": pred["bytesBase64Encoded"]}
+                    if pred.get("mimeType"):
+                        item["media_type"] = pred["mimeType"]
+                    items.append(item)
+            payload["data"] = items
+            return payload, effective
+
+        merged, _seeds = _fan_out_requests(count, per_call, single_predict)
+        return merged, start_ts, time.perf_counter() - start
+
+    closest = _closest_ratio(aspect_ratio, GEMINI_ASPECTS) or "1:1"
+    if seed is not None:
+        print(f"warning: modelo {model!r} via Gemini (generateContent) não "
+              "suporta seed; a seed pedida foi ignorada", file=sys.stderr)
+    url = GEMINI_GENERATE_URL.format(model=urllib.parse.quote(model, safe=""))
+    parts = _gemini_image_parts(prompt, references)
+    base = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": closest,
+                "imageSize": GEMINI_SIZES.get(resolution, "1K"),
+            },
+        },
+    }
+
+    def single_generate(_n: int, _index: int) -> tuple[dict, None]:
+        status, raw = _post_json(url, base, headers, timeout_s, cancel_event)
+        if status != 200:
+            if _is_content_policy_refusal(status, raw):
+                raise ContentPolicyError(
+                    _content_policy_message(model, prompt, status, raw,
+                                            len(references), provider_label="Google")
+                )
+            raise RuntimeError(f"Gemini HTTP {status}: {raw[:2000]}")
+        payload = json.loads(raw)
+        payload["data"] = _gemini_parse_images(payload, model)
+        return payload, None
+
+    merged, _seeds = _fan_out_requests(count, 1, single_generate)
+    return merged, start_ts, time.perf_counter() - start
 
 
 REQUEST_FUNCS = {
     "openrouter": request_openrouter,
     "gemini": request_gemini,
+    "openai": request_openai,
 }
 
 
@@ -1065,7 +1781,16 @@ def run_generation(
 
     context_text = load_context_text(context_dir)
     references = load_memory_references(memory_dir)
-    final_prompt = build_final_prompt(prompt, context_text, aspect_ratio, resolution)
+    prompt_caps: dict | None = None
+    if provider == "openrouter" and not dry_run:
+        try:
+            prompt_caps = _model_capabilities(model, api_key or "", cancel_event)
+        except GenerationCancelled:
+            raise
+        except Exception:
+            prompt_caps = None
+    final_prompt = build_final_prompt(prompt, context_text, aspect_ratio, resolution,
+                                      prompt_caps)
 
     request_start = time.time()
     t0 = time.perf_counter()
@@ -1085,6 +1810,7 @@ def run_generation(
             local_cost = 0.0
             local_created = ""
             local_raw: int | float | str = ""
+            payload: dict = {}
             if dry_run:
                 stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
                 width, height = target_dimensions(aspect_ratio, resolution)
@@ -1101,6 +1827,7 @@ def run_generation(
                     local_paths.append(path)
                 local_created = dt.datetime.now().astimezone().isoformat(timespec="seconds")
                 local_raw = local_created
+                image_box["seeds"] = [seed] * len(local_paths)
             else:
                 if not api_key:
                     env_var = PROVIDERS[provider]["env_var"]
@@ -1143,6 +1870,7 @@ def run_generation(
             image_box["created"] = local_created
             image_box["raw"] = local_raw
             image_box["elapsed"] = time.perf_counter() - t0
+            image_box["seeds"] = payload.get("seeds") or []
         except Exception as exc:
             image_box["error"] = exc
 
@@ -1197,8 +1925,11 @@ def run_generation(
     entries: list[dict] = []
     finished_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     per_image_cost = cost / len(paths) if paths and cost else (0.0 if not paths else cost)
-    for path in paths:
+    effective_seeds = image_box.get("seeds") or []
+    for index, path in enumerate(paths):
         size_bytes, width, height = inspect_image(path)
+        effective = (effective_seeds[index] if index < len(effective_seeds)
+                     else seed)
         entries.append(
             {
                 "date": finished_iso,
@@ -1210,6 +1941,7 @@ def run_generation(
                 "height": str(height),
                 "resolution_req": resolution,
                 "aspect_ratio_req": aspect_ratio,
+                "seed": "" if effective is None else str(effective),
                 "cost_usd": f"{per_image_cost:.6f}",
                 "generation_timestamp": str(created_iso or api_created_raw),
                 "total_seconds": f"{elapsed:.2f}",

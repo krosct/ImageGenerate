@@ -30,13 +30,14 @@ python3 -m unittest tests.test_web_server -v -k Generate -k generate
 
 | Area | Functions / notes |
 |---|---|
-| Provider registry | `PROVIDERS`, `normalize_provider`, `REQUEST_FUNCS` — one entry + one `request_*` function per provider, same `(payload, start_ts, elapsed)` contract |
-| HTTP (cancellable) | `_post_json` via `http.client`, `abort_all_http()` (shutdown+close), `GenerationCancelled` |
+| Provider registry | `PROVIDERS` (`openrouter`/`gemini`/`openai`), `normalize_provider` (pt-BR errors, unknown slugs rejected), `MODEL_PREFIXES` + `_check_model_for_provider` (family prefixes, never an allowlist), `REQUEST_FUNCS` — one entry + one `request_*` function per provider, same `(payload, start_ts, elapsed)` contract; `payload["seeds"]` holds the effective seed per image |
+| HTTP (cancellable) | `_post_json` via `http.client`, `_fetch_json` (GET, capability discovery), `abort_all_http()` (shutdown+close), `GenerationCancelled` |
+| Model capabilities | `_model_capabilities` (cached per model, `refresh=True` forces refetch, intersection across endpoints), `_adapt_image_body` — drops unsupported params, clamps enums/ranges (`_closest_ratio`), resolution validated against enum; `_fan_out_requests` loops until `count` images received (seed+i per call); reactive retry once on capability-mismatch 400s; `ContentPolicyError` for content-filter 400s |
 | Core pipeline | `run_generation()` — image + summary threads in parallel, partial cleanup on cancel, appends CSV; `run_generation_batch()` runs one `count=1` generation per prompt (Injection mode) and aggregates results |
 | Injection templating | `extract_template_vars` / `apply_template_values` / `resolve_injection_rows` (`{{name}}` placeholders; empty cell repeats the value above, first row falls back to the variable name); CLI `--inject NAME=VALUE,…` (one option per generation), GUI conditional yellow "Injection" tab, web `injection` field on `/api/generate` + yellow nav tab (`web/frontend/src/injection.ts`, `tabs/Injection.tsx`) |
 | Key vault | `save/load/forget_remembered_key`, one Fernet key + one blob per provider in `vault_dir()` (`~/.config/image_generate/`), `key_hash()` (SHA-256/16, log only) |
 | GUI config | `load/save/sanitize_gui_config` → `config.json` in the same dir; precedence: hard defaults < config file < explicit CLI flags |
-| CSV log | `LOG_FIELDS`, `read/write/append_log_entries`; `#` comment lines on top hold totals; GUI `Treeview` columns are generated from `LOG_FIELDS` |
+| CSV log | `LOG_FIELDS` (includes effective `seed` per image), `read/write/append_log_entries`; `#` comment lines on top hold totals; GUI `Treeview` columns are generated from `LOG_FIELDS` |
 | GUI | `run_gui()` — Notebook tabs (Injection tab shown only when count > 1 and prompt has `{{vars}}`), spoiler log list, `on_generate`/`on_cancel`/`on_done`, hover `attach_help` tooltips, ratio-preview tooltip |
 | Web | `web/server.py` (FastAPI, localhost only) — jobs + SSE, mirrors the core; frontend `web/frontend/src` (Vite/React, build with `npm run build` in `web/frontend`) |
 

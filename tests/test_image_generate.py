@@ -57,7 +57,7 @@ class IsolatedEnvMixin(unittest.TestCase):
         os.environ["XDG_CONFIG_HOME"] = self._tmp_config.name
         self._had_env: dict[str, bool] = {}
         self._saved_env: dict[str, str | None] = {}
-        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
             self._had_env[var] = var in os.environ
             self._saved_env[var] = os.environ.get(var)
             os.environ.pop(var, None)
@@ -68,7 +68,7 @@ class IsolatedEnvMixin(unittest.TestCase):
             os.environ["XDG_CONFIG_HOME"] = self._old_xdg
         else:
             os.environ.pop("XDG_CONFIG_HOME", None)
-        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
             if self._had_env[var] and self._saved_env[var] is not None:
                 restored = self._saved_env[var]
                 assert restored is not None
@@ -125,6 +125,7 @@ class ProviderRegistryTest(IsolatedEnvMixin):
         self.assertEqual(ig.normalize_provider("openrouter"), "openrouter")
         self.assertEqual(ig.normalize_provider("  OpenRouter "), "openrouter")
         self.assertEqual(ig.normalize_provider("GEMINI"), "gemini")
+        self.assertEqual(ig.normalize_provider("OpenAI"), "openai")
 
     def test_normalize_invalid(self):
         for bad in ["", "  ", "has space", "UPPER SPACE", "../x", "a_b", "prov!"]:
@@ -134,6 +135,11 @@ class ProviderRegistryTest(IsolatedEnvMixin):
     def test_normalize_unknown(self):
         with self.assertRaises(ValueError):
             ig.normalize_provider("dallex")
+
+    def test_normalize_unknown_lists_supported(self):
+        with self.assertRaises(ValueError) as ctx:
+            ig.normalize_provider("anthropic")
+        self.assertIn("suportados", str(ctx.exception))
 
     def test_registry_entries_have_contract_fields(self):
         for pid, info in ig.PROVIDERS.items():
@@ -832,9 +838,20 @@ class HttpCancelTest(IsolatedEnvMixin):
 
 class ProviderRequestTest(IsolatedEnvMixin):
 
-    def _ok_payload(self):
+    def setUp(self):
+        super().setUp()
+        # Keep capability discovery offline: unknown model -> caps None.
+        self._caps_fetch = mock.patch.object(
+            ig, "_fetch_json", return_value=(404, "not found"))
+        self._caps_fetch.start()
+        self.addCleanup(self._caps_fetch.stop)
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _ok_payload(self, n=1):
         raw = _png_bytes()
-        return {"data": [{"b64_json": base64.b64encode(raw).decode()}],
+        return {"data": [{"b64_json": base64.b64encode(raw).decode()}
+                         for _ in range(n)],
                 "usage": {"cost": 0.02}, "created": 1700000000}
 
     def test_openrouter_body_and_contract(self):
@@ -842,7 +859,8 @@ class ProviderRequestTest(IsolatedEnvMixin):
 
         def fake_post(url, body, headers, timeout_s, cancel_event=None):
             captured["body"] = body
-            return 200, json.dumps(self._ok_payload())
+            captured["calls"] = captured.get("calls", 0) + 1
+            return 200, json.dumps(self._ok_payload(n=body.get("n", 1)))
 
         with mock.patch.object(ig, "_post_json", side_effect=fake_post):
             payload, start_ts, elapsed = ig.request_openrouter(
@@ -850,11 +868,13 @@ class ProviderRequestTest(IsolatedEnvMixin):
                 resolution="1K", references=[], output_format="png",
                 seed=7, count=2, timeout_s=5)
         body = captured["body"]
+        self.assertEqual(captured["calls"], 1)  # provider honored n=2
         self.assertEqual(body["model"], "m")
         self.assertEqual(body["n"], 2)
         self.assertEqual(body["seed"], 7)
         self.assertNotIn("input_references", body)
         self.assertIn("data", payload)
+        self.assertEqual(payload["seeds"], [7, 7])
         self.assertGreaterEqual(elapsed, 0.0)
 
     def test_openrouter_optional_fields(self):
@@ -881,12 +901,383 @@ class ProviderRequestTest(IsolatedEnvMixin):
                     resolution="1K", references=[], output_format="png",
                     seed=None, count=1, timeout_s=5)
 
-    def test_gemini_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            ig.request_gemini(
-                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
-                resolution="1K", references=[], output_format="png",
-                seed=None, count=1, timeout_s=5)
+    def test_openrouter_content_policy_raises_friendly(self):
+        raw = json.dumps({"error": {"message": "The response was filtered due to "
+                                      "the prompt triggering our content "
+                                      "management policy.", "code": 400,
+                                     "metadata": {"provider_name": "Meta"}}})
+        with mock.patch.object(ig, "_post_json", return_value=(400, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                ig.request_openrouter(
+                    api_key="k", model="meta/muse-image", prompt="um gato",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        message = str(ctx.exception)
+        self.assertIsInstance(ctx.exception, RuntimeError)
+        self.assertIn("filtro de conteudo", message)
+        self.assertIn("um gato", message)
+        self.assertIn("Context dir", message)
+        self.assertIn("Meta", message)
+
+    def test_openrouter_caps_fetch_failure_keeps_body(self):
+        # _fetch_json patched in setUp returns 404 -> caps None -> body unchanged.
+        with mock.patch.object(ig, "_post_json",
+                               return_value=(200, json.dumps(self._ok_payload()))):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="21:9",
+                resolution="1K", references=[], output_format="webp",
+                seed=7, count=2, timeout_s=5)
+        self.assertIn("data", payload)
+
+    def test_openrouter_adapts_body_to_model_capabilities(self):
+        # Regression: flux.2-klein-4b rejects resolution/n>1/webp (HTTP 400).
+        endpoints = {"endpoints": [{
+            "provider_name": "Black Forest Labs",
+            "supported_parameters": {
+                "aspect_ratio": {"type": "enum",
+                                 "values": ["1:1", "4:3", "16:9", "21:9", "auto"]},
+                "output_format": {"type": "enum", "values": ["png", "jpeg"]},
+                "n": {"type": "range", "min": 1, "max": 1},
+                "input_references": {"type": "range", "min": 0, "max": 4},
+                "seed": {"type": "boolean"},
+            },
+        }]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                payload, _ts, _el = ig.request_openrouter(
+                    api_key="k", model="black-forest-labs/flux.2-klein-4b",
+                    prompt="p", aspect_ratio="21:9", resolution="1K",
+                    references=[{"type": "image_url"}] * 6,
+                    output_format="webp", seed=7, count=3, timeout_s=5)
+        # n=1-only provider: one request per image, payloads merged.
+        self.assertEqual(len(bodies), 3)
+        for index, body in enumerate(bodies):
+            self.assertNotIn("resolution", body)  # unsupported -> dropped
+            self.assertEqual(body["aspect_ratio"], "21:9")  # supported -> kept
+            self.assertEqual(body["output_format"], "png")  # webp -> first enum
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(len(body["input_references"]), 4)  # clamped to max
+            self.assertEqual(body["seed"], 7 + index)  # seed varied per call
+        self.assertEqual(len(payload["data"]), 3)
+        self.assertEqual(payload["seeds"], [7, 8, 9])  # effective seeds logged
+
+    def test_openrouter_caps_cached_across_calls(self):
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "n": {"type": "range", "min": 1, "max": 2}}}]}
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))) as fetch:
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                ig.request_openrouter(
+                    api_key="k", model="cached/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=2, timeout_s=5)
+                ig.request_openrouter(
+                    api_key="k", model="cached/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=2, timeout_s=5)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_closest_ratio_mapping(self):
+        values = ["1:1", "4:3", "16:9", "21:9", "auto"]
+        self.assertEqual(ig._closest_ratio("16:9", values), "16:9")
+        self.assertEqual(ig._closest_ratio("9:16", values), "1:1")  # log-closest
+        self.assertIsNone(ig._closest_ratio("auto", ["1:1", "16:9"]))
+
+    def test_openrouter_resolution_value_validated_against_enum(self):
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "resolution": {"type": "enum", "values": ["1K", "2K", "4K"]},
+            "n": {"type": "range", "min": 1, "max": 10}}}]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                ig.request_openrouter(
+                    api_key="k", model="tiered/model", prompt="p",
+                    aspect_ratio="1:1", resolution="512", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        self.assertNotIn("resolution", bodies[0])  # 512 not in enum -> dropped
+
+    def test_openrouter_capabilities_intersect_across_endpoints(self):
+        endpoints = {"endpoints": [
+            {"supported_parameters": {
+                "resolution": {"type": "enum", "values": ["1K", "2K"]},
+                "n": {"type": "range", "min": 1, "max": 4},
+                "seed": {"type": "boolean"}}},
+            {"supported_parameters": {
+                "resolution": {"type": "enum", "values": ["2K", "4K"]},
+                "n": {"type": "range", "min": 1, "max": 2}}},
+        ]}
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            caps = ig._model_capabilities("multi/ep", "k")
+        self.assertIsNotNone(caps)
+        assert caps is not None
+        self.assertEqual(caps["resolution"], {"type": "enum", "values": ["2K"]})
+        self.assertEqual(caps["n"], {"type": "range", "min": 1, "max": 2})
+        self.assertNotIn("seed", caps)
+
+    def test_openrouter_reactive_retry_on_capability_mismatch(self):
+        mismatch = json.dumps({"error": {
+            "message": "No provider for m supports the requested parameter(s): "
+                       'resolution "1K"',
+            "code": 400,
+            "metadata": {"failed_routing_step": "Filter by Image Capabilities"}}})
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "aspect_ratio": {"type": "enum", "values": ["1:1"]},
+            "n": {"type": "range", "min": 1, "max": 1}}}]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            if len(bodies) == 1:
+                return 400, mismatch
+            return 200, json.dumps(self._ok_payload())
+
+        fetches = [(404, "not found"), (200, json.dumps(endpoints))]
+        with mock.patch.object(ig, "_fetch_json", side_effect=fetches):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                payload, _ts, _el = ig.request_openrouter(
+                    api_key="k", model="flaky/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("resolution", bodies[0])  # first attempt: full body
+        self.assertNotIn("resolution", bodies[1])  # retry: adapted body
+        self.assertIn("data", payload)
+
+    def test_openrouter_retry_gives_up_when_caps_missing(self):
+        mismatch = json.dumps({"error": {
+            "message": "No provider for m supports the requested parameter(s)",
+            "code": 400}})
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            return 400, mismatch
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            with self.assertRaises(RuntimeError):
+                ig.request_openrouter(
+                    api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                    resolution="1K", references=[], output_format="png",
+                    seed=None, count=1, timeout_s=5)
+
+    def test_build_final_prompt_skips_supported_params(self):
+        caps = {"aspect_ratio": {"type": "enum", "values": ["1:1"]},
+                "resolution": {"type": "enum", "values": ["1K"]}}
+        # Supported params travel via API: no redundant text hint.
+        out = ig.build_final_prompt("a cat", "", "1:1", "1K", caps)
+        self.assertEqual(out, "a cat")
+        out = ig.build_final_prompt("a cat", "", "16:9", "2K", caps)
+        self.assertEqual(out, "a cat")
+        # Unsupported/unknown: hint kept as fallback.
+        out = ig.build_final_prompt("a cat", "", "16:9", "2K", {})
+        self.assertIn("aspect ratio 16:9", out)
+        self.assertIn("resolution tier 2K", out)
+        out = ig.build_final_prompt("a cat", "", "1:1", "1K")
+        self.assertIn("aspect ratio 1:1", out)
+
+
+class OpenaiRequestTest(IsolatedEnvMixin):
+
+    def setUp(self):
+        super().setUp()
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _b64_payload(self, n=1, created=1700000000):
+        raw = _png_bytes()
+        return {"created": created,
+                "data": [{"b64_json": base64.b64encode(raw).decode()}
+                         for _ in range(n)]}
+
+    def _call(self, **over):
+        params = {"api_key": "k", "model": "gpt-image-1", "prompt": "p",
+                  "aspect_ratio": "16:9", "resolution": "1K", "references": [],
+                  "output_format": "png", "seed": None, "count": 1,
+                  "timeout_s": 5}
+        params.update(over)
+        return ig.request_openai(**params)
+
+    def test_gpt_image_body(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            return 200, json.dumps(self._b64_payload(n=2))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=2)
+        self.assertTrue(urls[0].endswith("/v1/images/generations"))
+        self.assertEqual(bodies[0]["size"], "1536x1024")  # 16:9 landscape
+        self.assertEqual(bodies[0]["quality"], "medium")  # 1K tier
+        self.assertEqual(bodies[0]["n"], 2)
+        self.assertEqual(bodies[0]["output_format"], "png")
+        self.assertNotIn("response_format", bodies[0])
+        self.assertEqual(len(payload["data"]), 2)
+        self.assertEqual(payload["seeds"], [None, None])
+
+    def test_dalle3_single_only_loops(self):
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(model="dall-e-3", count=3,
+                                           aspect_ratio="9:16")
+        self.assertEqual(len(bodies), 3)
+        for body in bodies:
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(body["size"], "1024x1792")  # portrait
+            self.assertEqual(body["response_format"], "b64_json")
+        self.assertEqual(len(payload["data"]), 3)
+
+    def test_dalle2_size_and_quality_defaults(self):
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            self._call(model="dall-e-2", aspect_ratio="16:9")
+        self.assertEqual(bodies[0]["size"], "1024x1024")  # square only
+        self.assertNotIn("quality", bodies[0])
+
+    def test_references_rejected_informatively(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call(references=[{"type": "image_url"}])
+        self.assertIn("não aceita imagens de referência", str(ctx.exception))
+
+    def test_unknown_model_prefix_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._call(model="flux-fake-1")
+        self.assertIn("não parece ser do provider", str(ctx.exception))
+
+    def test_moderation_block_becomes_content_policy_error(self):
+        raw = json.dumps({"error": {"code": "moderation_blocked",
+                                    "message": "blocked", "type": "error"}})
+        with mock.patch.object(ig, "_post_json", return_value=(400, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                self._call()
+        self.assertIn("OpenAI", str(ctx.exception))
+
+
+class GeminiRequestTest(IsolatedEnvMixin):
+
+    def setUp(self):
+        super().setUp()
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _b64_payload(self):
+        raw = _png_bytes()
+        return {"candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "image/png",
+                            "data": base64.b64encode(raw).decode()}}]}}]}
+
+    def _call(self, **over):
+        params = {"api_key": "k", "model": "gemini-2.5-flash-image",
+                  "prompt": "p", "aspect_ratio": "21:9", "resolution": "2K",
+                  "references": [], "output_format": "png", "seed": None,
+                  "count": 1, "timeout_s": 5}
+        params.update(over)
+        return ig.request_gemini(**params)
+
+    def test_generate_content_body_and_parse(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=2)
+        self.assertIn(":generateContent", urls[0])
+        # generateContent yields one image per call -> fan-out.
+        self.assertEqual(len(bodies), 2)
+        config = bodies[0]["generationConfig"]
+        self.assertEqual(config["responseModalities"], ["TEXT", "IMAGE"])
+        self.assertEqual(config["imageConfig"]["aspectRatio"], "16:9")  # closest
+        self.assertEqual(config["imageConfig"]["imageSize"], "2K")
+        self.assertEqual(payload["data"][0]["media_type"], "image/png")
+        self.assertEqual(len(payload["data"]), 2)
+
+    def test_references_become_inline_data(self):
+        raw = _png_bytes()
+        url = f"data:image/png;base64,{base64.b64encode(raw).decode()}"
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        refs = [{"type": "image_url", "image_url": {"url": url}}]
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            self._call(references=refs)
+        parts = bodies[0]["contents"][0]["parts"]
+        self.assertEqual(parts[0], {"text": "p"})
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+
+    def test_imagen_predict_uses_seed_and_count(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+        raw = _png_bytes()
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            n = body["parameters"]["sampleCount"]
+            return 200, json.dumps({"predictions": [
+                {"bytesBase64Encoded": base64.b64encode(raw).decode(),
+                 "mimeType": "image/png"} for _ in range(n)]})
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(model="imagen-4.0-generate-001",
+                                           seed=5, count=2)
+        self.assertIn(":predict", urls[0])
+        self.assertEqual(len(bodies), 1)  # sampleCount covers count=2
+        self.assertEqual(bodies[0]["parameters"]["sampleCount"], 2)
+        self.assertEqual(bodies[0]["parameters"]["seed"], 5)
+        self.assertEqual(len(payload["data"]), 2)
+
+    def test_imagen_references_rejected_informatively(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call(model="imagen-4.0-generate-001",
+                       references=[{"type": "image_url"}])
+        self.assertIn("não aceita imagens de referência", str(ctx.exception))
+
+    def test_safety_block_becomes_content_policy_error(self):
+        raw = json.dumps({"promptFeedback": {"blockReason": "SAFETY"}})
+        with mock.patch.object(ig, "_post_json", return_value=(200, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                self._call()
+        self.assertIn("Google", str(ctx.exception))
+
+    def test_unknown_family_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._call(model="something-else-1")
+        self.assertIn("não parece ser do provider", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +1298,7 @@ class CsvLogTest(IsolatedEnvMixin):
     def test_log_fields_stable(self):
         self.assertEqual(ig.LOG_FIELDS, [
             "date", "prompt_summary", "prompt_full", "image_file", "image_bytes",
-            "width", "height", "resolution_req", "aspect_ratio_req", "cost_usd",
+            "width", "height", "resolution_req", "aspect_ratio_req", "seed", "cost_usd",
             "generation_timestamp", "total_seconds", "model", "provider", "key_hash",
         ])
 
@@ -996,6 +1387,51 @@ class RunGenerationTest(IsolatedEnvMixin):
         result = ig.run_generation(**_dry_kwargs(out, api_key="my-key"))
         row = ig.read_log_rows(Path(result["log_path"]))[0]
         self.assertEqual(row["key_hash"], ig.key_hash("my-key"))
+
+    def test_dry_run_records_requested_seed(self):
+        _, out = self.make_dirs()
+        result = ig.run_generation(**_dry_kwargs(out, seed=42, count=2))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual([r["seed"] for r in rows], ["42", "42"])
+
+    def test_dry_run_empty_seed_logged_blank(self):
+        _, out = self.make_dirs()
+        result = ig.run_generation(**_dry_kwargs(out, seed=None))
+        row = ig.read_log_rows(Path(result["log_path"]))[0]
+        self.assertEqual(row["seed"], "")
+
+    def test_mocked_remote_logs_effective_seeds_per_image(self):
+        _, out = self.make_dirs()
+        raw = _png_bytes()
+        payload = {"data": [{"b64_json": base64.b64encode(raw).decode()}
+                            for _ in range(3)],
+                   "usage": {"cost": 0.03}, "created": 1700000000,
+                   "seeds": [7, 8, 9]}
+
+        def fake_request(**kwargs):
+            return payload, 0.0, 0.1
+
+        with mock.patch.dict(ig.REQUEST_FUNCS, {"openrouter": fake_request}):
+            result = ig.run_generation(
+                **_dry_kwargs(out, dry_run=False, api_key="k", count=3,
+                              seed=7))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual([r["seed"] for r in rows], ["7", "8", "9"])
+
+    def test_mocked_remote_without_seeds_falls_back_to_base(self):
+        _, out = self.make_dirs()
+        raw = _png_bytes()
+        payload = {"data": [{"b64_json": base64.b64encode(raw).decode()}],
+                   "usage": {}, "created": 1700000000}
+
+        def fake_request(**kwargs):
+            return payload, 0.0, 0.1
+
+        with mock.patch.dict(ig.REQUEST_FUNCS, {"openrouter": fake_request}):
+            result = ig.run_generation(
+                **_dry_kwargs(out, dry_run=False, api_key="k", seed=11))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual(rows[0]["seed"], "11")
 
     def test_missing_key_non_dry_run(self):
         _, out = self.make_dirs()
