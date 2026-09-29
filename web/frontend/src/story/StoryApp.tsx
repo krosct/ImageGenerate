@@ -5,15 +5,19 @@ import StoryPlayer from './StoryPlayer'
 
 // StoryGenerate in the web UI: same tabs as the desktop app (story_generate.py
 // --gui) — Generate / Model / Voices / Player — sharing story_config.json.
-type Tab = 'generate' | 'model' | 'voices' | 'player'
+// The tab bar lives in the top bar (App.tsx), like ImageGenerate's.
+export type StoryTab = 'generate' | 'model' | 'voices' | 'player'
 
 const EMPTY: StoryConfig = {
   input_dir: '', output_dir: '', writer_model: '', tts_model: '', language: 'pt-BR',
   voices: [], dry_run: false, force: false, style: 'descriptive', duration: '', log_sort: '',
 }
 
-export default function StoryApp({ notice }: { notice: (text: string) => void }) {
-  const [tab, setTab] = useState<Tab>('generate')
+export default function StoryApp({ notice, tab, setTab }: {
+  notice: (text: string) => void
+  tab: StoryTab
+  setTab: (tab: StoryTab) => void
+}) {
   const [cfg, setCfg] = useState<StoryConfig>(EMPTY)
   const [meta, setMeta] = useState<StoryMeta | null>(null)
   const [apiKey, setApiKey] = useState('')
@@ -87,14 +91,6 @@ export default function StoryApp({ notice }: { notice: (text: string) => void })
 
   return (
     <>
-      <nav className="tabs story-tabs">
-        {(['generate', 'model', 'voices', 'player'] as const).map((t) => (
-          <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </nav>
-
       <div style={{ display: tab === 'generate' ? undefined : 'none' }}>
         <StoryGenerateTab cfg={cfg} meta={meta} set={set} apiKey={apiKey} rememberKey={rememberKey}
           openInPlayer={openInPlayer} goVoices={() => setTab('voices')} refreshKey={refreshKey} />
