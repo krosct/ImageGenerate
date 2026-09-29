@@ -35,6 +35,7 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -334,6 +335,8 @@ CONFIG_KEYS = (
     "resolution",
     "output_format",
     "dry_run",
+    "analyse",
+    "chosen_dir",
 )
 
 
@@ -389,6 +392,10 @@ def sanitize_gui_config(data: dict) -> dict:
     fmt = str(data.get("output_format", "png"))
     clean["output_format"] = fmt if fmt in OUTPUT_FORMATS else "png"
     clean["dry_run"] = bool(data.get("dry_run", False))
+    dirs = data.get("analyse", [])
+    clean["analyse"] = [d for d in dirs if isinstance(d, str) and d.strip()] \
+        if isinstance(dirs, list) else []
+    clean["chosen_dir"] = str(data.get("chosen_dir", "") or "")
     return clean
 
 
@@ -1933,6 +1940,240 @@ def append_log_entries(log_path: Path, entries: list[dict]) -> tuple[int, float]
 
 
 # ---------------------------------------------------------------------------
+# Analyse: compare folders side by side and copy the chosen images
+# ---------------------------------------------------------------------------
+
+CHOSEN_DIRNAME = "chosen"
+REPORT_MD = "report.md"
+REPORT_CSV = "report.csv"
+REPORT_FIELDS = [
+    "row", "source_folder", "source_path", "file", "copied_as", "bytes", "width", "height",
+    "modified", "prompt_summary", "prompt_full", "model", "provider", "seed",
+    "resolution_req", "aspect_ratio_req", "cost_usd", "generated", "alternatives",
+]
+
+
+def default_chosen_dir(output_dir: str | None = None) -> str:
+    return str(Path(output_dir or default_output_dir()).expanduser() / CHOSEN_DIRNAME)
+
+
+def list_folder_images(folder: str | Path) -> list[Path]:
+    """Images directly inside folder, newest first (modification time, then name)."""
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        raise FileNotFoundError(f"folder not found: {folder}")
+    images = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+    return sorted(images, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+
+
+def build_analysis_rows(folders: list[str | Path], newest_first: bool = True
+                        ) -> list[list[Path | None]]:
+    """Row i = the i-th newest (or oldest) image of every folder; a folder with
+    fewer images leaves None in its cell. One column per folder."""
+    columns = [list_folder_images(f) for f in folders]
+    if not newest_first:
+        columns = [list(reversed(c)) for c in columns]
+    height = max((len(c) for c in columns), default=0)
+    return [[c[i] if i < len(c) else None for c in columns] for i in range(height)]
+
+
+THUMB_SIZE = 150
+THUMB_ZOOM_LEVELS = (100, 150, 220, 320, 480)  # Analyse tab Zoom -/+ (pixels)
+
+
+def thumbnail_cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / VAULT_DIRNAME / "thumbs"
+
+
+def make_thumbnail(source: str | Path, size: int = THUMB_SIZE) -> Path | None:
+    """Small PNG copy of an image for the Analyse grid (Tk shows only PNG/GIF
+    and full-size images would use a lot of memory). Cached by path, mtime
+    and size; made with ImageMagick `convert` or `ffmpeg`. None when neither
+    tool works (the GUI then subsamples PNG/GIF itself)."""
+    src = Path(source)
+    try:
+        st = src.stat()
+    except OSError:
+        return None
+    key = hashlib.sha1(f"{src.resolve()}|{st.st_mtime_ns}|{st.st_size}|{size}".encode()).hexdigest()
+    out = thumbnail_cache_dir() / f"{key}.png"
+    if out.is_file():
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    commands = []
+    if shutil.which("convert"):
+        commands.append(["convert", f"{src}[0]", "-thumbnail", f"{size}x{size}", str(out)])
+    if shutil.which("ffmpeg"):
+        commands.append(["ffmpeg", "-loglevel", "error", "-y", "-i", str(src), "-frames:v", "1",
+                         "-vf", f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                         str(out)])
+    for command in commands:
+        try:
+            subprocess.run(command, capture_output=True, timeout=60, check=True)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.is_file():
+            return out
+    return None
+
+
+def parse_pick(spec: str, folder_count: int) -> tuple[int, int]:
+    """CLI "ROW:COL" (1-based; COL = folder position) -> (row_index, folder_index)."""
+    row_text, sep, col_text = spec.partition(":")
+    if not sep or not row_text.strip().isdigit() or not col_text.strip().isdigit():
+        raise ValueError(f"invalid --choose {spec!r} (expected ROW:COL, e.g. 3:2)")
+    row, col = int(row_text), int(col_text)
+    if row < 1 or not 1 <= col <= folder_count:
+        raise ValueError(f"invalid --choose {spec!r}: row >= 1 and column 1..{folder_count}")
+    return row - 1, col - 1
+
+
+def _log_index(folder: Path, parents: int = 2) -> dict[str, dict]:
+    """image_file -> generation log row for the images of folder.
+
+    Looks at the folder's own log_image_generate.csv first and then at the
+    logs of up to `parents` folders above it (images are often moved into
+    subfolders while the log stays behind). File names carry a timestamp, so
+    matching by name is safe; the nearest log wins.
+    """
+    index: dict[str, dict] = {}
+    current = folder
+    for _level in range(parents + 1):
+        for row in read_log_rows(current / LOG_FILENAME):
+            index.setdefault(row.get("image_file", ""), row)
+        if current.parent == current:
+            break
+        current = current.parent
+    return index
+
+
+def choose_images(
+    folders: list[str | Path],
+    picks: dict[int, int],
+    chosen_root: str | Path,
+    newest_first: bool = True,
+) -> dict:
+    """Copy the picked images ({row_index: folder_index}, one per row) into a new
+    <chosen_root>/<timestamp>/ folder with report.md + report.csv describing
+    each one (origin, size, date, prompt/model/seed from the source log, and
+    the alternatives it was chosen over). Originals are only read.
+    Returns {"folder", "report_md", "report_csv", "rows"}.
+    """
+    if not picks:
+        raise ValueError("no image selected")
+    folders = [Path(f).expanduser() for f in folders]
+    rows = build_analysis_rows(folders, newest_first)
+    for row_index, folder_index in picks.items():
+        if not 0 <= row_index < len(rows) or not 0 <= folder_index < len(folders):
+            raise ValueError(f"selection out of range: row {row_index + 1}, "
+                             f"column {folder_index + 1}")
+        if rows[row_index][folder_index] is None:
+            raise ValueError(f"row {row_index + 1} has no image in column {folder_index + 1} "
+                             f"({folders[folder_index].name})")
+    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    dest = Path(chosen_root).expanduser() / stamp
+    counter = 2
+    while dest.exists():
+        dest = Path(chosen_root).expanduser() / f"{stamp}_{counter}"
+        counter += 1
+    dest.mkdir(parents=True)
+    logs = [_log_index(f) for f in folders]
+    width = len(str(len(rows)))
+    report_rows: list[dict] = []
+    for row_index in sorted(picks):
+        folder_index = picks[row_index]
+        source = rows[row_index][folder_index]
+        assert source is not None
+        folder = folders[folder_index]
+        copied_as = f"{row_index + 1:0{width}d}_{folder.name}_{source.name}"
+        shutil.copy2(source, dest / copied_as)
+        size, img_w, img_h = inspect_image(source)
+        log = logs[folder_index].get(source.name, {})
+        alternatives = [f"{folders[i].name}/{cell.name}" for i, cell in enumerate(rows[row_index])
+                        if cell is not None and i != folder_index]
+        report_rows.append({
+            "row": str(row_index + 1),
+            "source_folder": str(folder),
+            "source_path": str(source),
+            "file": source.name,
+            "copied_as": copied_as,
+            "bytes": str(size),
+            "width": str(img_w),
+            "height": str(img_h),
+            "modified": dt.datetime.fromtimestamp(source.stat().st_mtime).astimezone()
+                        .isoformat(timespec="seconds"),
+            "prompt_summary": log.get("prompt_summary", ""),
+            "prompt_full": log.get("prompt_full", ""),
+            "model": log.get("model", ""),
+            "provider": log.get("provider", ""),
+            "seed": log.get("seed", ""),
+            "resolution_req": log.get("resolution_req", ""),
+            "aspect_ratio_req": log.get("aspect_ratio_req", ""),
+            "cost_usd": log.get("cost_usd", ""),
+            "generated": log.get("date", ""),
+            "alternatives": "; ".join(alternatives),
+        })
+    with (dest / REPORT_CSV).open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=REPORT_FIELDS)
+        writer.writeheader()
+        writer.writerows(report_rows)
+    (dest / REPORT_MD).write_text(
+        analysis_report_markdown(folders, rows, picks, report_rows, newest_first, dest),
+        encoding="utf-8")
+    return {"folder": str(dest), "report_md": str(dest / REPORT_MD),
+            "report_csv": str(dest / REPORT_CSV), "rows": report_rows}
+
+
+def analysis_report_markdown(folders: list[Path], rows: list[list[Path | None]],
+                             picks: dict[int, int], report_rows: list[dict],
+                             newest_first: bool, dest: Path) -> str:
+    """Human-readable report of a Choose: what was compared and what was kept."""
+    created = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    counts = [sum(1 for row in rows if row[i] is not None) for i in range(len(folders))]
+    chosen_per_folder = [sum(1 for f in picks.values() if f == i) for i in range(len(folders))]
+    lines = [
+        "# Chosen images", "",
+        f"- Created: {created}",
+        f"- Destination: `{dest}`",
+        f"- Order: {'newest first' if newest_first else 'oldest first'} "
+        "(row N = the N-th image of every folder by modification time)",
+        f"- Rows compared: {len(rows)}; chosen: {len(picks)}; "
+        f"rows without a choice: {len(rows) - len(picks)}",
+        "", "## Folders compared", "",
+        "| # | Folder | Images | Chosen | Share of choices |", "|---|---|---|---|---|",
+    ]
+    for i, folder in enumerate(folders):
+        share = f"{100 * chosen_per_folder[i] / len(picks):.0f}%" if picks else "-"
+        lines.append(f"| {i + 1} | `{folder}` | {counts[i]} | {chosen_per_folder[i]} | {share} |")
+    lines += ["", "## Chosen images", "",
+              "| Row | From | File | Copied as | Size | Modified | Model | Seed |",
+              "|---|---|---|---|---|---|---|---|"]
+    for r in report_rows:
+        lines.append(f"| {r['row']} | {Path(r['source_folder']).name} | {r['file']} | "
+                     f"{r['copied_as']} | {r['width']}x{r['height']} ({r['bytes']} B) | "
+                     f"{r['modified'][:19].replace('T', ' ')} | {r['model'] or '-'} | "
+                     f"{r['seed'] or '-'} |")
+    lines += ["", "## Details", ""]
+    for r in report_rows:
+        lines += [f"### Row {r['row']} - {r['copied_as']}", "",
+                  f"- Source: `{r['source_path']}`",
+                  f"- Chosen over: {r['alternatives'] or '(no other image in this row)'}"]
+        if r["prompt_full"]:
+            lines += [f"- Generated: {r['generated'][:19].replace('T', ' ')} with "
+                      f"{r['provider'] or '?'} / {r['model'] or '?'} "
+                      f"(aspect {r['aspect_ratio_req'] or '?'}, resolution "
+                      f"{r['resolution_req'] or '?'}, seed {r['seed'] or '-'}, "
+                      f"cost ${r['cost_usd'] or '0'})",
+                      f"- Prompt: {r['prompt_full']}"]
+        else:
+            lines.append("- No generation info (image not found in the folder's "
+                         f"{LOG_FILENAME})")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Core generation pipeline (shared by CLI and GUI)
 # ---------------------------------------------------------------------------
 
@@ -2292,6 +2533,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Skip API, write placeholder PNG.")
     parser.add_argument("--gui", action="store_true", help="Force GUI mode.")
     parser.add_argument("--list-log", action="store_true", help="Print CSV log rows and exit.")
+    parser.add_argument("--analyse", action="append", default=[], metavar="DIR",
+                        help="Analyse: compare the images of these folders (repeat, at least "
+                             "1). Row N = the N-th newest image of each folder. Prints the "
+                             "table; add --choose to copy picks.")
+    parser.add_argument("--choose", action="append", default=[], metavar="ROW:COL",
+                        help="With --analyse: pick the image of row ROW in folder COL "
+                             "(1-based, one per row; repeat). Copies them into a new "
+                             f"<chosen-dir>/<timestamp>/ with {REPORT_MD} + {REPORT_CSV}.")
+    parser.add_argument("--oldest-first", action="store_true",
+                        help="With --analyse: align rows from the oldest image instead.")
+    parser.add_argument("--chosen-dir", default=None,
+                        help=f"With --choose: where the '{CHOSEN_DIRNAME}' copies go "
+                             f"(default: <output-dir>/{CHOSEN_DIRNAME}).")
     return parser
 
 
@@ -2302,6 +2556,41 @@ def resolve_prompt(args: argparse.Namespace) -> str:
             return f"{args.prompt}\n\n{text}"
         return text
     return args.prompt
+
+
+def analyse_cli(args: argparse.Namespace, output_dir: str) -> int:
+    """--analyse [--choose ROW:COL ...]: print the comparison table / copy picks."""
+    folders = [Path(f).expanduser() for f in args.analyse]
+    newest_first = not getattr(args, "oldest_first", False)
+    try:
+        rows = build_analysis_rows(folders, newest_first)
+        picks: dict[int, int] = {}
+        for spec in getattr(args, "choose", []) or []:
+            row, col = parse_pick(spec, len(folders))
+            if row in picks:
+                raise ValueError(f"row {row + 1} picked twice (only one image per row)")
+            picks[row] = col
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not picks:
+        print("row  " + "  |  ".join(f"[{i + 1}] {f.name}" for i, f in enumerate(folders)))
+        for index, row in enumerate(rows, start=1):
+            print(f"{index:>3}  " + "  |  ".join(cell.name if cell else "-" for cell in row))
+        counts = ", ".join(f"{f.name}: {sum(1 for r in rows if r[i])}"
+                           for i, f in enumerate(folders))
+        print(f"{len(rows)} rows ({'newest' if newest_first else 'oldest'} first) | {counts}")
+        print("pick with --choose ROW:COL (e.g. --choose 1:2)")
+        return 0
+    try:
+        result = choose_images(folders, picks, args.chosen_dir or default_chosen_dir(output_dir),
+                               newest_first)
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"copied {len(result['rows'])} image(s) to {result['folder']}")
+    print(f"report: {result['report_md']} (+ {REPORT_CSV})")
+    return 0
 
 
 def main_cli(args: argparse.Namespace) -> int:
@@ -2326,6 +2615,8 @@ def main_cli(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         print(f"remembered {provider} key in {blob}")
+    if getattr(args, "analyse", None):
+        return analyse_cli(args, output_dir)
     if args.list_log:
         log_path = Path(output_dir) / LOG_FILENAME
         rows = read_log_rows(log_path)
@@ -2540,6 +2831,8 @@ def run_gui(defaults: dict | None = None) -> None:
     tab_injection = ttk.Frame(notebook, padding=8)
     notebook.add(tab_injection, text="Injection")
     notebook.hide(tab_injection)
+    tab_analyse = ttk.Frame(notebook, padding=8)
+    notebook.add(tab_analyse, text="Analyse")
     injection_entries: list[list[ttk.Entry]] = []
 
     out_var = tk.StringVar(value=str(merged.get("output_dir") or default_output_dir()))
@@ -2729,6 +3022,279 @@ def run_gui(defaults: dict | None = None) -> None:
     # in the Summary list.
     out_var.trace_add("write", lambda *_a: None if state["running"]
                       else state.update(batch_logs=[]))
+
+    # ---- Analyse tab: folders side by side, one pick per row, Choose ----
+    # Row N = the N-th newest (or oldest) image of every folder; clicking an
+    # image selects it (only one per row); Choose copies the picks + a report.
+    analyse: dict = {"folders": [str(Path(d).expanduser()) for d in merged.get("analyse", [])
+                                 if Path(d).expanduser().is_dir()],
+                     "newest_first": True, "rows": [], "picks": {}, "cells": {},
+                     "thumbs": {}, "generation": 0, "size": THUMB_SIZE}
+    chosen_var = tk.StringVar(value=str(merged.get("chosen_dir", "") or ""))
+    an_top = ttk.Frame(tab_analyse)
+    an_top.pack(fill=tk.X)
+    add_btn = ttk.Button(an_top, text="Add folder…", command=lambda: analyse_add_folder())
+    add_btn.pack(side=tk.LEFT)
+    attach_help(add_btn, "Add a folder of images to compare (one column per folder; "
+                         "at least 1, no limit).")
+    order_btn = ttk.Button(an_top, text="Order: newest first ⇅",
+                           command=lambda: analyse_invert())
+    order_btn.pack(side=tk.LEFT, padx=6)
+    attach_help(order_btn, "Invert the order: rows aligned from the newest image of each "
+                           "folder, or from the oldest.")
+    ttk.Button(an_top, text="Clear selection", command=lambda: analyse_clear()).pack(side=tk.LEFT)
+    ttk.Button(an_top, text="Refresh", command=lambda: analyse_render()).pack(side=tk.LEFT, padx=6)
+    zoom_in_btn = ttk.Button(an_top, text="Zoom +", width=7, command=lambda: analyse_zoom(1))
+    zoom_in_btn.pack(side=tk.RIGHT)
+    zoom_var = tk.StringVar(value=f"{THUMB_SIZE} px")
+    ttk.Label(an_top, textvariable=zoom_var, width=7, anchor=tk.CENTER).pack(side=tk.RIGHT)
+    zoom_out_btn = ttk.Button(an_top, text="Zoom −", width=7, command=lambda: analyse_zoom(-1))
+    zoom_out_btn.pack(side=tk.RIGHT)
+    attach_help(zoom_in_btn, "Bigger previews (up to 480 px). Selections are kept. "
+                             "Double-click an image to open it full size.")
+    attach_help(zoom_out_btn, "Smaller previews (down to 100 px), to see more rows at once.")
+    an_chips = ttk.Frame(tab_analyse)
+    an_chips.pack(fill=tk.X, pady=(6, 4))
+
+    an_grid_frame = ttk.Frame(tab_analyse)
+    an_grid_frame.pack(fill=tk.BOTH, expand=True)
+    an_canvas = tk.Canvas(an_grid_frame, highlightthickness=0, background="#f4f4f4")
+    an_vscroll = ttk.Scrollbar(an_grid_frame, orient=tk.VERTICAL, command=an_canvas.yview)
+    an_hscroll = ttk.Scrollbar(an_grid_frame, orient=tk.HORIZONTAL, command=an_canvas.xview)
+    an_canvas.configure(yscrollcommand=an_vscroll.set, xscrollcommand=an_hscroll.set)
+    an_canvas.grid(row=0, column=0, sticky=tk.NSEW)
+    an_vscroll.grid(row=0, column=1, sticky=tk.NS)
+    an_hscroll.grid(row=1, column=0, sticky=tk.EW)
+    an_grid_frame.rowconfigure(0, weight=1)
+    an_grid_frame.columnconfigure(0, weight=1)
+    an_inner = tk.Frame(an_canvas, background="#f4f4f4")
+    an_canvas.create_window((0, 0), window=an_inner, anchor=tk.NW)
+    an_inner.bind("<Configure>", lambda _e: an_canvas.configure(scrollregion=an_canvas.bbox("all")))
+
+    def an_wheel(event: object) -> None:
+        num = getattr(event, "num", 0)
+        delta = getattr(event, "delta", 0)
+        step = -1 if (num == 4 or delta > 0) else 1
+        if getattr(event, "state", 0) & 0x1:  # Shift + wheel -> horizontal
+            an_canvas.xview_scroll(step, "units")
+        else:
+            an_canvas.yview_scroll(step, "units")
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        an_canvas.bind(seq, an_wheel)
+
+    an_info_var = tk.StringVar(value="Add at least one folder to start.")
+    ttk.Label(tab_analyse, textvariable=an_info_var, wraplength=820, justify=tk.LEFT).pack(
+        fill=tk.X, pady=(6, 2))
+    an_bottom = ttk.Frame(tab_analyse)
+    an_bottom.pack(fill=tk.X)
+    ttk.Label(an_bottom, text="Chosen dir:").pack(side=tk.LEFT)
+    chosen_entry = ttk.Entry(an_bottom, textvariable=chosen_var, width=50)
+    chosen_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+    attach_help(chosen_entry, f"Where Choose puts its copies: a new <chosen dir>/<date_time>/ "
+                              f"folder with the images + {REPORT_MD} and {REPORT_CSV}. Empty = "
+                              f"<Output dir>/{CHOSEN_DIRNAME}.")
+    ttk.Button(an_bottom, text="Browse", command=lambda: pick_dir(chosen_var)).pack(side=tk.LEFT)
+    choose_btn = ttk.Button(an_bottom, text="Choose", style="Generate.TButton",
+                            command=lambda: analyse_choose())
+    choose_btn.pack(side=tk.LEFT, padx=(8, 0))
+    attach_help(choose_btn, "Copy the selected images (one per row) and write a report with "
+                            "where each one came from, its prompt/model/seed and what it was "
+                            "chosen over. Originals are never moved or changed.")
+
+    COLOR_PICKED, COLOR_IDLE = "#16a34a", "#d4d4d4"
+
+    def analyse_add_folder() -> None:
+        start = analyse["folders"][-1] if analyse["folders"] else out_var.get().strip()
+        start_dir = nearest_existing_dir(start)
+        chosen = filedialog.askdirectory(**({"initialdir": str(start_dir)} if start_dir else {}))
+        if not chosen:
+            return
+        if chosen in analyse["folders"]:
+            messagebox.showinfo("Analyse", "This folder is already in the table.")
+            return
+        analyse["folders"].append(chosen)
+        analyse_render()
+
+    def analyse_remove_folder(index: int) -> None:
+        removed = Path(analyse["folders"][index]).expanduser()
+        keep = {path for path in analyse_pick_paths() if Path(path).parent != removed}
+        analyse["folders"].pop(index)
+        analyse_render(keep=keep)
+
+    def analyse_pick_paths() -> set[str]:
+        return {str(analyse["rows"][r][c]) for r, c in analyse["picks"].items()
+                if r < len(analyse["rows"]) and analyse["rows"][r][c] is not None}
+
+    def analyse_render(keep: set[str] | None = None) -> None:
+        """Rebuild the chips and the grid; keep selections by image path."""
+        keep = analyse_pick_paths() if keep is None else keep
+        for child in an_chips.winfo_children():
+            child.destroy()
+        for index, folder in enumerate(analyse["folders"]):
+            chip = ttk.Frame(an_chips, relief=tk.GROOVE, padding=(6, 2))
+            chip.pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Label(chip, text=f"{index + 1}. {Path(folder).name}").pack(side=tk.LEFT)
+            ttk.Button(chip, text="✕", width=2,
+                       command=lambda i=index: analyse_remove_folder(i)).pack(side=tk.LEFT,
+                                                                             padx=(4, 0))
+            attach_help(chip, folder)
+        for child in an_inner.winfo_children():
+            child.destroy()
+        analyse["cells"].clear()
+        analyse["generation"] += 1
+        try:
+            rows = build_analysis_rows(analyse["folders"], analyse["newest_first"])
+        except FileNotFoundError as exc:
+            messagebox.showerror("Analyse", str(exc))
+            rows = []
+        analyse["rows"] = rows
+        picks: dict[int, int] = {}
+        dropped = 0
+        for r, row in enumerate(rows):
+            for c, cell in enumerate(row):
+                if cell is not None and str(cell) in keep:
+                    if r in picks:
+                        dropped += 1
+                    else:
+                        picks[r] = c
+        analyse["picks"] = picks
+        order_btn.configure(text="Order: newest first ⇅" if analyse["newest_first"]
+                            else "Order: oldest first ⇅")
+        if not analyse["folders"]:
+            an_info_var.set("Add at least one folder to start.")
+            return
+        bg = "#f4f4f4"
+        tk.Label(an_inner, text="row", background=bg, font=("TkDefaultFont", 9, "bold")).grid(
+            row=0, column=0, padx=4, pady=4)
+        for c, folder in enumerate(analyse["folders"]):
+            count = sum(1 for row in rows if row[c] is not None)
+            tk.Label(an_inner, text=f"{c + 1}. {Path(folder).name}\n{count} image(s)",
+                     background=bg, font=("TkDefaultFont", 9, "bold"), width=20).grid(
+                row=0, column=c + 1, padx=4, pady=4)
+        pending: list[tuple[int, int, Path]] = []
+        for r, row in enumerate(rows):
+            tk.Label(an_inner, text=str(r + 1), background=bg).grid(row=r + 1, column=0, padx=4)
+            for c, cell in enumerate(row):
+                if cell is None:
+                    tk.Label(an_inner, text="—", background=bg, width=20, height=8,
+                             foreground="#999").grid(row=r + 1, column=c + 1, padx=4, pady=4)
+                    continue
+                label = tk.Label(an_inner, text="loading…", width=20, height=8,
+                                 background="white", relief=tk.FLAT, cursor="hand2",
+                                 highlightthickness=4, highlightbackground=COLOR_IDLE)
+                label.grid(row=r + 1, column=c + 1, padx=4, pady=4)
+                label.bind("<Button-1>", lambda _e, rr=r, cc=c: analyse_toggle(rr, cc))
+                label.bind("<Double-1>", lambda _e, path=cell: open_path(str(path)))
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    label.bind(seq, an_wheel)
+                stat = cell.stat()
+                attach_help(label, f"{cell.name}\n{Path(cell).parent}\nmodified "
+                                   f"{dt.datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}"
+                                   f" · {stat.st_size / 1024:.0f} KB\n(click = select, "
+                                   "double-click = open)")
+                analyse["cells"][(r, c)] = label
+                pending.append((r, c, cell))
+        analyse_paint()
+        if dropped:
+            an_info_var.set(an_info_var.get() + f"  |  {dropped} selection(s) dropped: the new "
+                                                "order put two picks in the same row")
+        threading.Thread(target=analyse_load_thumbs, args=(analyse["generation"], pending),
+                         daemon=True).start()
+
+    def analyse_load_thumbs(generation: int, pending: list[tuple[int, int, Path]]) -> None:
+        for r, c, path in pending:
+            if generation != analyse["generation"]:
+                return
+            thumb = make_thumbnail(path, analyse["size"])
+            root.after(0, lambda rr=r, cc=c, p=path, t=thumb: analyse_set_thumb(generation, rr,
+                                                                                  cc, p, t))
+
+    def analyse_set_thumb(generation: int, r: int, c: int, path: Path, thumb: Path | None) -> None:
+        if generation != analyse["generation"] or (r, c) not in analyse["cells"]:
+            return
+        size = analyse["size"]
+        cache_key = f"{thumb or path}@{size}"
+        image = analyse["thumbs"].get(cache_key)
+        if image is None:
+            try:
+                if thumb is not None:
+                    image = tk.PhotoImage(file=str(thumb))
+                elif path.suffix.lower() in (".png", ".gif"):
+                    full = tk.PhotoImage(file=str(path))
+                    factor = max(1, math.ceil(max(full.width(), full.height()) / size))
+                    image = full.subsample(factor, factor)
+            except tk.TclError:
+                image = None
+            if image is not None:
+                analyse["thumbs"][cache_key] = image
+        label = analyse["cells"][(r, c)]
+        if image is None:
+            label.configure(text=f"{path.name}\n(no preview:\ninstall ImageMagick)")
+        else:
+            label.configure(image=image, text="", width=size, height=size)
+
+    def analyse_toggle(r: int, c: int) -> None:
+        if analyse["picks"].get(r) == c:
+            del analyse["picks"][r]
+        else:
+            analyse["picks"][r] = c  # only one per row: replaces the previous pick
+        analyse_paint()
+
+    def analyse_paint() -> None:
+        for (r, c), label in analyse["cells"].items():
+            picked = analyse["picks"].get(r) == c
+            label.configure(highlightbackground=COLOR_PICKED if picked else COLOR_IDLE,
+                            background="#dcfce7" if picked else "white")
+        rows, folders, picks = analyse["rows"], analyse["folders"], analyse["picks"]
+        parts = [f"rows: {len(rows)}", f"selected: {len(picks)}",
+                 f"rows without a pick: {len(rows) - len(picks)}"]
+        for c, folder in enumerate(folders):
+            total = sum(1 for row in rows if row[c] is not None)
+            chosen = sum(1 for col in picks.values() if col == c)
+            parts.append(f"{c + 1}. {Path(folder).name}: {total} image(s), {chosen} selected")
+        an_info_var.set("  |  ".join(parts))
+        choose_btn.configure(state=tk.NORMAL if picks else tk.DISABLED)
+
+    def analyse_zoom(step: int) -> None:
+        levels = THUMB_ZOOM_LEVELS
+        current = min(range(len(levels)), key=lambda i: abs(levels[i] - analyse["size"]))
+        target = max(0, min(len(levels) - 1, current + step))
+        zoom_out_btn.configure(state=tk.NORMAL if target > 0 else tk.DISABLED)
+        zoom_in_btn.configure(state=tk.NORMAL if target < len(levels) - 1 else tk.DISABLED)
+        if levels[target] == analyse["size"]:
+            return
+        analyse["size"] = levels[target]
+        zoom_var.set(f"{levels[target]} px")
+        analyse["thumbs"].clear()  # free the previous size from memory
+        analyse_render()
+
+    def analyse_invert() -> None:
+        keep = analyse_pick_paths()
+        analyse["newest_first"] = not analyse["newest_first"]
+        analyse_render(keep=keep)
+
+    def analyse_clear() -> None:
+        analyse["picks"].clear()
+        analyse_paint()
+
+    def analyse_choose() -> None:
+        if not analyse["picks"]:
+            return
+        target = chosen_var.get().strip() or default_chosen_dir(out_var.get().strip() or None)
+        try:
+            result = choose_images(analyse["folders"], dict(analyse["picks"]), target,
+                                   analyse["newest_first"])
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Choose", str(exc))
+            return
+        persist_gui_config()
+        if messagebox.askyesno("Choose", f"Copied {len(result['rows'])} image(s) to\n"
+                                         f"{result['folder']}\n\nwith {REPORT_MD} and "
+                                         f"{REPORT_CSV}.\n\nOpen the folder?"):
+            open_path(result["folder"])
+
+    root.after(300, analyse_render)
 
     # ---- Generate tab: per-generation options (not assigned to a tab
     # in the requested layout, kept here next to the prompt) ----
@@ -3286,6 +3852,8 @@ def run_gui(defaults: dict | None = None) -> None:
                 "resolution": res_var.get().strip(),
                 "output_format": fmt_var.get().strip(),
                 "dry_run": bool(dry_var.get()),
+                "analyse": list(analyse["folders"]),
+                "chosen_dir": chosen_var.get().strip(),
             })
         except OSError:
             pass
@@ -3312,7 +3880,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     wants_cli_work = bool(
-        args.list_log or args.forget_key or args.remember_key
+        args.list_log or args.forget_key or args.remember_key or args.analyse
         or resolve_prompt(args).strip() or args.dry_run and resolve_prompt(args).strip()
     )
     if args.gui or not wants_cli_work:
@@ -3334,6 +3902,8 @@ def main(argv: list[str] | None = None) -> int:
             "--aspect-ratio": "prop",
             "--resolution": "resolution",
             "--output-format": "output_format",
+            "--analyse": "analyse",
+            "--chosen-dir": "chosen_dir",
         }
         gui_defaults = {}
         for flag, key in flag_map.items():

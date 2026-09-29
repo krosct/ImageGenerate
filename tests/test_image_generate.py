@@ -1864,6 +1864,117 @@ class DynamicDirsTest(IsolatedEnvMixin):
         self.assertEqual(code, 2)
 
 
+class AnalyseTest(IsolatedEnvMixin):
+    """Analyse tab core: aligned rows, one pick per row, Choose copy + report."""
+
+    def folder(self, name: str, count: int, start: float = 1_700_000_000) -> Path:
+        tmp, _ = self.make_dirs()
+        folder = Path(tmp.name) / name
+        folder.mkdir()
+        for i in range(count):  # file i is newer than file i-1
+            path = folder / f"img_{i}.png"
+            ig.write_placeholder_png(path, 20 + i, 10)
+            os.utime(path, (start + i * 10, start + i * 10))
+        (folder / "notes.txt").write_text("not an image")
+        return folder
+
+    def test_rows_newest_and_oldest_first(self):
+        a, b = self.folder("A", 3), self.folder("B", 2)
+        rows = ig.build_analysis_rows([a, b])
+        self.assertEqual([[c.name if c else None for c in r] for r in rows],
+                         [["img_2.png", "img_1.png"], ["img_1.png", "img_0.png"],
+                          ["img_0.png", None]])
+        rows = ig.build_analysis_rows([a, b], newest_first=False)
+        self.assertEqual([[c.name if c else None for c in r] for r in rows],
+                         [["img_0.png", "img_0.png"], ["img_1.png", "img_1.png"],
+                          ["img_2.png", None]])
+        with self.assertRaises(FileNotFoundError):
+            ig.build_analysis_rows([a, a / "missing"])
+
+    def test_choose_copies_and_reports(self):
+        a, b = self.folder("A", 3), self.folder("B", 2)
+        ig.write_log(b / ig.LOG_FILENAME, [{**{k: "" for k in ig.LOG_FIELDS},
+                                            "image_file": "img_1.png", "prompt_full": "a cat",
+                                            "model": "m/x", "seed": "7", "date": "2026-09-28"}])
+        tmp, _ = self.make_dirs()
+        result = ig.choose_images([a, b], {0: 1, 2: 0}, Path(tmp.name) / "chosen")
+        dest = Path(result["folder"])
+        self.assertEqual(dest.parent, Path(tmp.name) / "chosen")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()),
+                         ["1_B_img_1.png", "3_A_img_0.png", "report.csv", "report.md"])
+        self.assertTrue((b / "img_1.png").is_file())  # originals untouched
+        rows = list(csv.DictReader((dest / "report.csv").open(encoding="utf-8")))
+        self.assertEqual([r["row"] for r in rows], ["1", "3"])
+        self.assertEqual(rows[0]["prompt_full"], "a cat")
+        self.assertEqual(rows[0]["seed"], "7")
+        self.assertEqual(rows[0]["alternatives"], "A/img_2.png")
+        self.assertEqual(rows[1]["alternatives"], "")  # B has no 3rd image
+        md = (dest / "report.md").read_text(encoding="utf-8")
+        self.assertIn("Rows compared: 3; chosen: 2; rows without a choice: 1", md)
+        self.assertIn("| 2 | `" + str(b) + "` | 2 | 1 | 50% |", md)
+        self.assertIn("- Prompt: a cat", md)
+        self.assertIn("No generation info", md)  # A has no log
+        again = ig.choose_images([a, b], {0: 0}, Path(tmp.name) / "chosen")
+        self.assertNotEqual(again["folder"], result["folder"])  # never overwrites
+
+    def test_report_finds_log_in_parent_folder(self):
+        tmp, _ = self.make_dirs()
+        sub = Path(tmp.name) / "generated" / "muse 1"
+        sub.mkdir(parents=True)
+        ig.write_placeholder_png(sub / "image_1.png", 10, 10)
+        ig.write_log(sub.parent / ig.LOG_FILENAME, [{**{k: "" for k in ig.LOG_FIELDS},
+                                                    "image_file": "image_1.png",
+                                                    "prompt_full": "from parent log"}])
+        result = ig.choose_images([sub], {0: 0}, Path(tmp.name) / "chosen")
+        self.assertEqual(result["rows"][0]["prompt_full"], "from parent log")
+
+    def test_choose_validation(self):
+        a, b = self.folder("A", 2), self.folder("B", 1)
+        tmp, _ = self.make_dirs()
+        for picks, msg in (({}, "no image selected"), ({1: 1}, "no image in column 2"),
+                           ({5: 0}, "out of range"), ({0: 3}, "out of range")):
+            with self.assertRaisesRegex(ValueError, msg):
+                ig.choose_images([a, b], picks, tmp.name)
+
+    def test_parse_pick(self):
+        self.assertEqual(ig.parse_pick("3:2", 2), (2, 1))
+        for bad in ("3", "0:1", "1:3", "a:b", "1:0"):
+            with self.assertRaises(ValueError, msg=bad):
+                ig.parse_pick(bad, 2)
+
+    def test_cli_analyse_and_choose(self):
+        a, b = self.folder("A", 2), self.folder("B", 2)
+        tmp, _ = self.make_dirs()
+        with redirect_stdout(io.StringIO()) as out:
+            code = ig.main(["--analyse", str(a), "--analyse", str(b)])
+        self.assertEqual(code, 0)
+        self.assertIn("  1  img_1.png  |  img_1.png", out.getvalue())
+        with redirect_stdout(io.StringIO()) as out:
+            code = ig.main(["--analyse", str(a), "--analyse", str(b), "--choose", "1:2",
+                            "--choose", "2:1", "--oldest-first", "--chosen-dir", tmp.name])
+        self.assertEqual(code, 0)
+        dest = Path(out.getvalue().split("to ", 1)[1].splitlines()[0])
+        self.assertEqual(sorted(p.name for p in dest.glob("*.png")),
+                         ["1_B_img_0.png", "2_A_img_1.png"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(ig.main(["--analyse", str(a), "--choose", "1:1",
+                                      "--choose", "1:1"]), 2)  # same row twice
+
+    def test_thumbnail_cache(self):
+        a = self.folder("A", 1)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(a / "cache")}):
+            thumb = ig.make_thumbnail(a / "img_0.png", size=16)
+            if thumb is None:
+                self.skipTest("no convert/ffmpeg available")
+            self.assertTrue(thumb.is_file())
+            self.assertEqual(ig.make_thumbnail(a / "img_0.png", size=16), thumb)  # cached
+
+    def test_config_keeps_analyse_folders(self):
+        clean = ig.sanitize_gui_config({"analyse": ["/a", "", 3, "/b"], "chosen_dir": "/c"})
+        self.assertEqual((clean["analyse"], clean["chosen_dir"]), (["/a", "/b"], "/c"))
+        self.assertEqual(ig.sanitize_gui_config({"analyse": "x"})["analyse"], [])
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
