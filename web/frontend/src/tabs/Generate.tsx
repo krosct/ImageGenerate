@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
-import { api, listenJob, LogResponse } from '../api'
-import { extractTemplateVars, parseCountText, resolveInjectionRows } from '../injection'
+import { useEffect, useRef, useState } from 'react'
+import { api, DynamicDirs, listenJob, LogResponse } from '../api'
+import { extractTemplateVars, MAX_COUNT, MIN_COUNT, parseCountText, resolveInjectionRows } from '../injection'
 
 interface Props {
   outputDir: string
@@ -27,6 +27,7 @@ interface Props {
   setCountText: (v: string) => void
   injectionCells: string[][]
   setInjectionCells: (update: (old: string[][]) => string[][]) => void
+  dynamicDirs: DynamicDirs
 }
 
 function ratioBox(prop: string): { w: number; h: number } | null {
@@ -54,6 +55,10 @@ export default function Generate(p: Props) {
   const [pendingCount, setPendingCount] = useState(1)
   const [pendingInjection, setPendingInjection] = useState<Record<string, string>[] | undefined>()
   const audioRef = useRef<AudioContext | null>(null)
+  // Log dirs written by the current/last batch (Dynamic output subfolders),
+  // merged into the log list; reset when the Output dir changes.
+  const batchLogDirs = useRef<string[]>([])
+  useEffect(() => { batchLogDirs.current = [] }, [p.outputDir])
 
   const templateVars = extractTemplateVars(p.prompt)
   const countNum = parseCountText(p.countText)
@@ -118,7 +123,7 @@ export default function Generate(p: Props) {
 
   async function refreshLog() {
     try {
-      setLog(await api.log(p.outputDir))
+      setLog(await api.log(p.outputDir, batchLogDirs.current))
     } catch (e) {
       setStatus(`log error: ${(e as Error).message}`)
     }
@@ -142,16 +147,32 @@ export default function Generate(p: Props) {
         output_format: p.outputFormat,
         count,
         injection: injectionRows ?? [],
+        dynamic_dirs: count > 1
+          ? Object.fromEntries(Object.entries(p.dynamicDirs)
+            .filter(([, d]) => d.enabled)
+            .map(([k, d]) => [k, { start: d.start.trim(), range: d.range.trim() }]))
+          : {},
         seed: seedText.trim() === '' ? null : parseInt(seedText.trim(), 10) || null,
         dry_run: p.dryRun,
         api_key: p.apiKey || null,
         remember_key: p.rememberKey,
       })
       setJobId(job_id)
+      batchLogDirs.current = []
+      let seenDone = 0
       listenJob(job_id, (ev) => {
         if (ev.status === 'running') {
           setElapsed(ev.elapsed)
+          // A batch generation finished (already logged): refresh the log now.
+          if (ev.progress && ev.progress.done > seenDone) {
+            seenDone = ev.progress.done
+            batchLogDirs.current = ev.progress.log_dirs
+            setStatus(`generating... ${ev.progress.done}/${ev.progress.total} done`)
+            setLogOpen(true)
+            void refreshLog()
+          }
         } else if (ev.status === 'done') {
+          batchLogDirs.current = ev.result.log_dirs ?? []
           setRunning(false)
           setElapsed(ev.result.elapsed)
           setStatus(`saved ${ev.result.images.length} image(s) | $${ev.result.cost.toFixed(6)}`)
@@ -179,13 +200,33 @@ export default function Generate(p: Props) {
     if (!p.prompt.trim()) { setStatus('type a prompt first'); return }
     if (!p.summaryModel.trim()) { setStatus('fill in Summary model first (Model tab)'); return }
     if (!/^[0-9]+$/.test(p.countText.trim())) {
-      setStatus('error: invalid count (need a natural number 1-10)')
+      setStatus(`error: invalid count (need a natural number ${MIN_COUNT}-${MAX_COUNT})`)
       return
     }
     const count = parseInt(p.countText.trim(), 10)
-    if (count < 1 || count > 10) {
-      setStatus('error: invalid count (need a natural number 1-10)')
+    if (count < MIN_COUNT || count > MAX_COUNT) {
+      setStatus(`error: invalid count (need a natural number ${MIN_COUNT}-${MAX_COUNT})`)
       return
+    }
+    if (count > 1) {
+      for (const [key, d] of Object.entries(p.dynamicDirs)) {
+        const label = key.replace('_dir', '')
+        if (!d.enabled) continue
+        const startText = d.start.trim() || '1'
+        if (!/^[0-9]+$/.test(startText) || parseInt(startText, 10) < 1) {
+          setStatus(`error: invalid ${label} dir Dynamic start (need a natural number >= 1) — Dir tab`)
+          return
+        }
+        const start = parseInt(startText, 10)
+        if (!d.range.trim()) {
+          setStatus(`error: ${label} dir Dynamic range is empty (need a natural number > ${start}) — Dir tab`)
+          return
+        }
+        if (!/^[0-9]+$/.test(d.range.trim()) || parseInt(d.range.trim(), 10) <= start) {
+          setStatus(`error: invalid ${label} dir Dynamic range (need a natural number > ${start}) — Dir tab`)
+          return
+        }
+      }
     }
     let injectionRows: Record<string, string>[] | undefined
     if (injectionActive) {
@@ -276,7 +317,7 @@ export default function Generate(p: Props) {
           </label>
           <div className="composer-actions">
             <button className="btn-cancel" onClick={onCancel} disabled={!running}>Cancel</button>
-            <label className="count-pill" title="How many images to generate with the same prompt (natural number 1-10). Above 1 asks for confirmation: each image may add costs.">
+            <label className="count-pill" title={`How many images to generate with the same prompt (natural number ${MIN_COUNT}-${MAX_COUNT}). Above 1 asks for confirmation: each image may add costs.`}>
             <input type="text" value={p.countText} inputMode="numeric"
               onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) p.setCountText(e.target.value) }}
               disabled={running} aria-label="Image count" />×
@@ -310,7 +351,7 @@ export default function Generate(p: Props) {
             <h3>History</h3>
             <span className="hint">log_image_generate.csv</span>
             <span className="hint">click a row to reuse its prompt</span>
-            <button className="ghost" onClick={refreshLog}>Refresh log</button>
+            <button className="ghost" onClick={() => void refreshLog()}>Refresh log</button>
           </div>
           {!log && <div className="hint">loading…</div>}
           {log && (

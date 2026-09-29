@@ -7,7 +7,8 @@ Gere imagens com IA sem esforço nem código: digite o prompt + dê contexto e r
 
 - **Gera imagens a partir de prompt** — digite o que quer ver, receba a imagem.
 - **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
-- **Gera imagens em loop** — `--count 3` (até 10) com o mesmo prompt.
+- **Gera imagens em loop** — `--count 3` (até 30) com o mesmo prompt.
+- **Pastas dinâmicas (Dynamic)** — com n > 1, marque *Dynamic* abaixo de Output/Context/Memory dir e informe *Start* (padrão 1) e *Range* (última pasta): as gerações usam `<pasta>/<Start>` … `<pasta>/<Range>` e voltam ao Start. CLI: `--dynamic-output 5 --dynamic-memory 12 --dynamic-memory-start 2`.
 - **Variáveis no prompt (Injection)** — use `{{nome}}` no prompt e preencha os valores por geração: aba amarela **Injection** na GUI/web ou `--inject 'pessoa=menino,objeto=sorvete'` no CLI (uma opção por geração).
 - **Escolhe modelo, proporção, resolução, formato** — `provider/model`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
 - **Salva log das requisições** — `log_image_generate.csv`.

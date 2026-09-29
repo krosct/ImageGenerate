@@ -149,6 +149,20 @@ class GenerateValidationTest(WebBase):
         self.assertEqual(resp.status_code, 400)
 
 
+    def test_dynamic_dirs_rejected(self):
+        base = {"prompt": "a cat", "summary_model": "m", "dry_run": True,
+                "output_dir": str(self.out)}
+        for over in ({"count": 1, "dynamic_dirs": {"output_dir": "2"}},
+                     {"count": 3, "dynamic_dirs": {"output_dir": ""}},
+                     {"count": 3, "dynamic_dirs": {"output_dir": "1"}},
+                     {"count": 3, "dynamic_dirs": {"output_dir": {"start": "3", "range": "3"}}},
+                     {"count": 3, "dynamic_dirs": {"output_dir": {"start": "0", "range": "3"}}},
+                     {"count": 3, "dynamic_dirs": {"context_dir": "2"},
+                      "context_dir": str(self.out)}):
+            resp = self.client.post("/api/generate", json={**base, **over})
+            self.assertEqual(resp.status_code, 400, over)
+
+
 @unittest.skipUnless(HAS_WEB, "fastapi/httpx not installed")
 class GenerateFlowTest(WebBase):
     """Happy paths: dry-run jobs finish and are served over SSE."""
@@ -175,6 +189,38 @@ class GenerateFlowTest(WebBase):
         fulls = sorted(r["prompt_full"]
                        for r in ig.read_log_rows(self.out / ig.LOG_FILENAME))
         self.assertEqual(fulls, ["a cat", "a dog"])
+
+    def test_dynamic_output_flow(self):
+        data = self._generate(count=3, dynamic_dirs={"output_dir": "2"})
+        job = self._wait_job(data["job_id"])
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertEqual(len(job["result"]["images"]), 3)
+        self.assertEqual(len(ig.read_log_rows(self.out / "1" / ig.LOG_FILENAME)), 2)
+        self.assertEqual(len(ig.read_log_rows(self.out / "2" / ig.LOG_FILENAME)), 1)
+
+    def test_dynamic_output_start_flow(self):
+        data = self._generate(count=3, dynamic_dirs={"output_dir": {"start": "2", "range": "3"}})
+        job = self._wait_job(data["job_id"])
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertEqual(len(ig.read_log_rows(self.out / "2" / ig.LOG_FILENAME)), 2)
+        self.assertEqual(len(ig.read_log_rows(self.out / "3" / ig.LOG_FILENAME)), 1)
+        self.assertFalse((self.out / "1").exists())
+
+    def test_dynamic_progress_and_log_newest_first(self):
+        data = self._generate(count=3, dynamic_dirs={"output_dir": "2"})
+        job = self._wait_job(data["job_id"])
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertEqual(job["progress"]["done"], 3)
+        self.assertEqual(job["progress"]["total"], 3)
+        dirs = job["result"]["log_dirs"]
+        self.assertEqual(sorted(Path(d).name for d in dirs), ["1", "2"])
+        base_only = self.client.get("/api/log", params={"output_dir": str(self.out)}).json()
+        self.assertEqual(base_only["total_ops"], 0)
+        merged = self.client.get("/api/log", params={"output_dir": str(self.out),
+                                                     "extra_dir": dirs}).json()
+        self.assertEqual(merged["total_ops"], 3)
+        stamps = [r["date"] for r in merged["rows"]]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
 
     def test_events_stream_reports_done(self):
         data = self._generate()
@@ -289,6 +335,10 @@ class ImagesLogTest(WebBase):
         body = resp.json()
         self.assertEqual(body["total_ops"], 1)
         self.assertEqual(len(body["rows"]), 1)
+        # newest request first
+        self._wait_job(self._generate(prompt="a dog")["job_id"])
+        body = self.client.get("/api/log", params={"output_dir": str(self.out)}).json()
+        self.assertEqual([r["prompt_full"] for r in body["rows"]], ["a dog", "a cat"])
 
 
 @unittest.skipUnless(HAS_WEB, "fastapi/httpx not installed")
@@ -308,6 +358,9 @@ class BrowseMkdirTest(WebBase):
                                params={"path": str(self.out / "nope" / "deeper")})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["path"], str(self.out.resolve()))
+        self.assertTrue(resp.json()["missing"])
+        existing = self.client.get("/api/browse", params={"path": str(self.out)})
+        self.assertFalse(existing.json()["missing"])
 
     def test_browse_not_a_folder(self):
         target = self.out / "f.txt"

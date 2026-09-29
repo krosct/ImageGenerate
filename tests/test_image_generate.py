@@ -165,10 +165,11 @@ class ParseCountTest(IsolatedEnvMixin):
     def test_valid_boundaries(self):
         self.assertEqual(ig.parse_count(1), 1)
         self.assertEqual(ig.parse_count(10), 10)
+        self.assertEqual(ig.parse_count(30), 30)
         self.assertEqual(ig.parse_count(" 3 "), 3)
 
     def test_invalid(self):
-        for bad in [0, 11, -1, "0", "11", "abc", "", None, "1.5", "  "]:
+        for bad in [0, 31, -1, "0", "31", "abc", "", None, "1.5", "  "]:
             with self.assertRaises(ValueError, msg=repr(bad)):
                 ig.parse_count(bad)
 
@@ -877,6 +878,59 @@ class ProviderRequestTest(IsolatedEnvMixin):
         self.assertEqual(payload["seeds"], [7, 7])
         self.assertGreaterEqual(elapsed, 0.0)
 
+    def _zod_n_too_big(self, maximum=10) -> str:
+        issues = json.dumps([{"origin": "number", "code": "too_big", "maximum": maximum,
+                              "inclusive": True, "path": ["n"],
+                              "message": f"Too big: expected number to be <={maximum}"}],
+                            indent=2)
+        return json.dumps({"success": False,
+                           "error": {"name": "ZodError", "message": issues}})
+
+    def test_n_limit_from_error(self):
+        self.assertEqual(ig._n_limit_from_error(
+            "OpenRouter HTTP 400: " + self._zod_n_too_big(10)), 10)
+        self.assertEqual(ig._n_limit_from_error(self._zod_n_too_big(4)), 4)
+        self.assertIsNone(ig._n_limit_from_error("OpenRouter HTTP 400: bad seed"))
+        self.assertIsNone(ig._n_limit_from_error(
+            self._zod_n_too_big().replace('\\"n\\"', '\\"seed\\"')))
+
+    def test_openrouter_count_above_api_max_is_split(self):
+        # n=24 with unknown caps: calls of <= 10 (10 + 10 + 4), seeds per call.
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            if body["n"] > ig.OPENROUTER_MAX_N:
+                return 400, self._zod_n_too_big()
+            return 200, json.dumps(self._ok_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                resolution="1K", references=[], output_format="png",
+                seed=5, count=24, timeout_s=5)
+        self.assertEqual(ns, [10, 10, 4])
+        self.assertEqual(len(payload["data"]), 24)
+        self.assertEqual(payload["seeds"], [5] * 10 + [6] * 10 + [7] * 4)
+
+    def test_openrouter_retries_with_router_n_limit(self):
+        # Router lowers its limit below our constant: parse it and retry once.
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            if body["n"] > 4:
+                return 400, self._zod_n_too_big(4)
+            return 200, json.dumps(self._ok_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                resolution="1K", references=[], output_format="png",
+                seed=None, count=9, timeout_s=5)
+        self.assertEqual(ns, [9, 4, 4, 1])
+        self.assertEqual(len(payload["data"]), 9)
+
     def test_openrouter_optional_fields(self):
         captured = {}
 
@@ -1112,6 +1166,18 @@ class OpenaiRequestTest(IsolatedEnvMixin):
                   "timeout_s": 5}
         params.update(over)
         return ig.request_openai(**params)
+
+    def test_count_above_api_max_is_split(self):
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            return 200, json.dumps(self._b64_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=24)
+        self.assertEqual(ns, [10, 10, 4])
+        self.assertEqual(len(payload["data"]), 24)
 
     def test_gpt_image_body(self):
         bodies: list[dict] = []
@@ -1524,6 +1590,225 @@ class RunGenerationBatchTest(IsolatedEnvMixin):
         self.assertEqual(seen_counts, [1, 1])
         self.assertEqual(len(result["images"]), 2)
         self.assertEqual(len(result["entries"]), 2)
+
+
+class LogOrderProgressTest(IsolatedEnvMixin):
+
+    def _row(self, date: str, name: str) -> dict:
+        row = {k: "" for k in ig.LOG_FIELDS}
+        row.update(date=date, image_file=name)
+        return row
+
+    def test_sort_newest_first(self):
+        rows = [self._row("2026-09-28T10:00:00-03:00", "a"),
+                self._row("2026-09-28T12:00:00-03:00", "b"),
+                self._row("2026-09-28T11:00:00-03:00", "c"),
+                self._row("2026-09-28T12:00:00-03:00", "d"),  # tie: later row on top
+                self._row("garbage", "e")]
+        got = [r["image_file"] for r in ig.sort_log_rows_newest_first(rows)]
+        self.assertEqual(got, ["d", "b", "c", "a", "e"])
+
+    def test_sort_mixed_offsets(self):
+        rows = [self._row("2026-09-28T12:00:00+00:00", "utc_noon"),
+                self._row("2026-09-28T10:00:00-03:00", "brt_10")]  # = 13:00 UTC
+        got = [r["image_file"] for r in ig.sort_log_rows_newest_first(rows)]
+        self.assertEqual(got, ["brt_10", "utc_noon"])
+
+    def test_collect_merges_and_dedups(self):
+        tmp, out = self.make_dirs()
+        sub = out / "1"
+        sub.mkdir()
+        ig.write_log(out / ig.LOG_FILENAME, [self._row("2026-09-28T10:00:00-03:00", "old")])
+        ig.write_log(sub / ig.LOG_FILENAME, [self._row("2026-09-28T11:00:00-03:00", "new")])
+        got = ig.collect_log_rows([out / ig.LOG_FILENAME, sub / ig.LOG_FILENAME,
+                                   out / ig.LOG_FILENAME, out / "missing" / ig.LOG_FILENAME])
+        self.assertEqual([r["image_file"] for r in got], ["new", "old"])
+
+    def test_on_progress_called_per_generation_after_logging(self):
+        _, out = self.make_dirs()
+        calls = []
+
+        def on_progress(info):
+            rows = ig.collect_log_rows([Path(p) for p in info["log_paths"]])
+            calls.append((info["done"], info["total"], len(info["images"]), len(rows)))
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=3).items() if k != "prompt"}
+        ig.run_generation_batch(["hi"], dynamic_dirs={"output_dir": "3"},
+                                on_progress=on_progress, **kwargs)
+        self.assertEqual(calls, [(1, 3, 1, 1), (2, 3, 2, 2), (3, 3, 3, 3)])
+        calls.clear()
+        ig.run_generation_batch(["a cat", "a dog"], on_progress=on_progress, **kwargs)
+        self.assertEqual([c[:2] for c in calls], [(1, 2), (2, 2)])
+
+    def test_on_progress_not_forwarded_to_single_run(self):
+        _, out = self.make_dirs()
+        kwargs = {k: v for k, v in _dry_kwargs(out).items() if k != "prompt"}
+        result = ig.run_generation_batch(["hi"], on_progress=lambda info: None, **kwargs)
+        self.assertEqual(len(result["images"]), 1)
+
+
+class DynamicDirsTest(IsolatedEnvMixin):
+
+    def _base(self, root: Path, *names: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (root / name).mkdir(parents=True)
+        return root
+
+    def test_parse_dynamic_range(self):
+        self.assertEqual(ig.parse_dynamic_range("2"), 2)
+        self.assertEqual(ig.parse_dynamic_range(" 10 "), 10)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            ig.parse_dynamic_range("")
+        for bad in ["0", "1", "-3", "abc", "1.5", None]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_range(bad)
+
+    def test_dynamic_dir_for_cycles(self):
+        got = [Path(ig.dynamic_dir_for("/a/b", 5, i)).name for i in range(10)]
+        self.assertEqual(got, ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"])
+
+    def test_dynamic_start(self):
+        self.assertEqual(ig.parse_dynamic_start(""), 1)
+        self.assertEqual(ig.parse_dynamic_start(None), 1)
+        self.assertEqual(ig.parse_dynamic_start(" 4 "), 4)
+        for bad in ["0", "-1", "x", "1.5"]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_start(bad)
+        self.assertEqual(ig.parse_dynamic_spec("5"), (1, 5))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "", "range": "5"}), (1, 5))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12"}), (2, 12))
+        for bad in ({"start": "5", "range": "5"}, {"start": "6", "range": "5"},
+                    {"start": "2", "range": ""}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_spec(bad)
+        got = [Path(ig.dynamic_dir_for("/a", 5, i, 2)).name for i in range(6)]
+        self.assertEqual(got, ["2", "3", "4", "5", "2", "3"])
+
+    def test_batch_resume_from_start(self):
+        # memory Start 2, Range 12, n=11: folders 2..12, memory/1 untouched.
+        tmp, out = self.make_dirs()
+        mem = self._base(Path(tmp.name) / "mem", *[str(i) for i in range(2, 13)])
+        seen = []
+        real = ig.run_generation
+
+        def spy(*, prompt, **kwargs):
+            seen.append(Path(kwargs["memory_dir"]).name)
+            return real(prompt=prompt, **kwargs)
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=11, memory_dir=str(mem)).items()
+                  if k != "prompt"}
+        with mock.patch.object(ig, "run_generation", side_effect=spy):
+            ig.run_generation_batch(["hi"], dynamic_dirs={
+                "memory_dir": {"start": "2", "range": "12"}}, **kwargs)
+        self.assertEqual(seen, [str(i) for i in range(2, 13)])
+
+    def test_check_requires_count_and_base(self):
+        tmp, out = self.make_dirs()
+        with self.assertRaisesRegex(ValueError, "count > 1"):
+            ig.check_dynamic_dirs({"output_dir": "3"}, {"output_dir": str(out)}, 1)
+        with self.assertRaisesRegex(ValueError, "base folder"):
+            ig.check_dynamic_dirs({"context_dir": "3"}, {"context_dir": ""}, 3)
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            ig.check_dynamic_dirs({"foo": "3"}, {}, 3)
+
+    def test_check_missing_context_subfolders(self):
+        tmp, _ = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "1", "2")
+        # count 2 only needs 1..2 -> ok even with range 10
+        self.assertEqual(ig.check_dynamic_dirs({"context_dir": "10"},
+                                               {"context_dir": str(ctx)}, 2),
+                         {"context_dir": (1, 10)})
+        with self.assertRaisesRegex(FileNotFoundError, "3"):
+            ig.check_dynamic_dirs({"context_dir": "10"}, {"context_dir": str(ctx)}, 3)
+
+    def test_batch_user_example(self):
+        # n=10, context Dynamic range 10, output Dynamic range 5, memory fixed.
+        tmp, out = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", *[str(i) for i in range(1, 11)])
+        for i in range(1, 11):
+            (ctx / str(i) / "c.md").write_text(f"ctx {i}", encoding="utf-8")
+        mem = self._base(Path(tmp.name) / "mem")
+        seen = []
+        real = ig.run_generation
+
+        def spy(*, prompt, **kwargs):
+            seen.append((kwargs["count"], kwargs["seed"], Path(kwargs["context_dir"]).name,
+                         Path(kwargs["output_dir"]).name, kwargs["memory_dir"]))
+            return real(prompt=prompt, **kwargs)
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=10, seed=7, context_dir=str(ctx),
+                                               memory_dir=str(mem)).items() if k != "prompt"}
+        with mock.patch.object(ig, "run_generation", side_effect=spy):
+            result = ig.run_generation_batch(
+                ["hello"], dynamic_dirs={"context_dir": "10", "output_dir": "5"}, **kwargs)
+        self.assertEqual([s[2] for s in seen], [str(i) for i in range(1, 11)])
+        self.assertEqual([s[3] for s in seen], ["1", "2", "3", "4", "5"] * 2)
+        self.assertEqual({s[4] for s in seen}, {str(mem)})
+        self.assertEqual({s[0] for s in seen}, {1})
+        self.assertEqual([s[1] for s in seen], list(range(7, 17)))
+        self.assertEqual(len(result["images"]), 10)
+        self.assertEqual(len(result["log_paths"]), 5)
+        for i in range(1, 6):
+            self.assertEqual(len(list((out / str(i)).glob("image_*.png"))), 2)
+            self.assertEqual(len(ig.read_log_rows(out / str(i) / ig.LOG_FILENAME)), 2)
+
+    def test_batch_missing_subfolder_runs_nothing(self):
+        tmp, out = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "1")
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=3, context_dir=str(ctx)).items()
+                  if k != "prompt"}
+        with mock.patch.object(ig, "run_generation") as run:
+            with self.assertRaises(FileNotFoundError):
+                ig.run_generation_batch(["hi"], dynamic_dirs={"context_dir": "3"}, **kwargs)
+        run.assert_not_called()
+
+    def test_nearest_existing_dir(self):
+        tmp, out = self.make_dirs()
+        self.assertEqual(ig.nearest_existing_dir(str(out)), out)
+        self.assertEqual(ig.nearest_existing_dir(str(out / "x" / "y")), out)
+        self.assertIsNone(ig.nearest_existing_dir(""))
+        self.assertIsNone(ig.nearest_existing_dir(None))
+
+    def test_cli_dynamic_output(self):
+        _, out = self.make_dirs()
+        args = MainCliTest._args(self, out, count=3, dynamic_output="2")
+        with redirect_stdout(io.StringIO()):
+            code = ig.main_cli(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((out / "1").glob("image_*.png"))), 2)
+        self.assertEqual(len(list((out / "2").glob("image_*.png"))), 1)
+
+    def test_cli_dynamic_errors(self):
+        _, out = self.make_dirs()
+        for over in ({"count": 1, "dynamic_output": "2"},
+                     {"count": 3, "dynamic_output": ""},
+                     {"count": 3, "dynamic_context": "2"}):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                code = ig.main_cli(MainCliTest._args(self, out, **over))
+            self.assertEqual(code, 2, over)
+
+    def test_parser_flags(self):
+        args = ig.build_parser().parse_args(["--dynamic-output", "5", "--dynamic-memory", "3",
+                                             "--dynamic-memory-start", "2"])
+        self.assertEqual((args.dynamic_output, args.dynamic_context, args.dynamic_memory),
+                         ("5", None, "3"))
+        self.assertEqual((args.dynamic_output_start, args.dynamic_memory_start), (None, "2"))
+
+    def test_cli_dynamic_output_start(self):
+        _, out = self.make_dirs()
+        args = MainCliTest._args(self, out, count=3, dynamic_output="4",
+                                 dynamic_output_start="3")
+        with redirect_stdout(io.StringIO()):
+            code = ig.main_cli(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((out / "3").glob("image_*.png"))), 2)
+        self.assertEqual(len(list((out / "4").glob("image_*.png"))), 1)
+        self.assertFalse((out / "1").exists())
+        # start without range -> range empty error
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = ig.main_cli(MainCliTest._args(self, out, count=3, dynamic_output_start="2"))
+        self.assertEqual(code, 2)
 
 
 # ---------------------------------------------------------------------------

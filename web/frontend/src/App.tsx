@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, AppConfig, ProvidersResponse } from './api'
+import { api, AppConfig, DynamicDirs, ProvidersResponse } from './api'
 import Generate from './tabs/Generate'
 import Model from './tabs/Model'
 import Dir from './tabs/Dir'
@@ -22,6 +22,11 @@ export default function App() {
   const [rememberKey, setRememberKey] = useState(false)
   const [notice, setNotice] = useState('')
   const [countText, setCountText] = useState('1')
+  const [dynamicDirs, setDynamicDirs] = useState<DynamicDirs>({
+    output_dir: { enabled: false, start: '1', range: '' },
+    context_dir: { enabled: false, start: '1', range: '' },
+    memory_dir: { enabled: false, start: '1', range: '' },
+  })
 
   useEffect(() => {
     api.providers().then(setMeta).catch(() => setNotice('cannot reach API (is web/server.py running?)'))
@@ -110,6 +115,7 @@ export default function App() {
           onUsePrompt={usePrompt} prompt={prompt} setPrompt={setPrompt}
           countText={countText} setCountText={setCountText}
           injectionCells={injectionCells} setInjectionCells={setInjectionCells}
+          dynamicDirs={dynamicDirs}
         />
       )}
       {tab === 'injection' && injectionVisible && (
@@ -133,6 +139,7 @@ export default function App() {
           outputDir={cfg.output_dir} setOutputDir={(v) => set('output_dir', v)}
           contextDir={cfg.context_dir} setContextDir={(v) => set('context_dir', v)}
           memoryDir={cfg.memory_dir} setMemoryDir={(v) => set('memory_dir', v)}
+          countText={countText} dynamicDirs={dynamicDirs} setDynamicDirs={setDynamicDirs}
         />
       )}
     </div>

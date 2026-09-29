@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, DynamicDirs, DynamicKey } from '../api'
+import { parseCountText } from '../injection'
 
 interface Props {
   outputDir: string
@@ -8,31 +9,69 @@ interface Props {
   setContextDir: (v: string) => void
   memoryDir: string
   setMemoryDir: (v: string) => void
+  countText: string
+  dynamicDirs: DynamicDirs
+  setDynamicDirs: (update: (old: DynamicDirs) => DynamicDirs) => void
 }
 
 export default function Dir(p: Props) {
-  const fields: [string, string, (v: string) => void, string][] = [
+  const fields: [string, string, (v: string) => void, string, DynamicKey][] = [
     ['Output dir', p.outputDir, p.setOutputDir,
-      'Folder where generated images and log_image_generate.csv are saved.'],
+      'Folder where generated images and log_image_generate.csv are saved.', 'output_dir'],
     ['Context dir', p.contextDir, p.setContextDir,
-      'Folder with .md/.txt files automatically added to the prompt as context.'],
+      'Folder with .md/.txt files automatically added to the prompt as context.', 'context_dir'],
     ['Memory dir', p.memoryDir, p.setMemoryDir,
-      'Folder with reference images sent along with the prompt to guide generation.'],
+      'Folder with reference images sent along with the prompt to guide generation.', 'memory_dir'],
   ]
   const [pickIndex, setPickIndex] = useState<number | null>(null)
+  const dynamicEnabled = parseCountText(p.countText) > 1
+
+  function setDynamic(key: DynamicKey, patch: Partial<DynamicDirs[DynamicKey]>) {
+    p.setDynamicDirs((old) => ({ ...old, [key]: { ...old[key], ...patch } }))
+  }
 
   return (
     <div className="card">
-      {fields.map(([label, value, setValue, hint], i) => (
-        <div key={label}>
-          <label className="field-label" title={hint}>{label} ⓘ</label>
-          <div className="pick-row">
-            <input type="text" value={value} onChange={(e) => setValue(e.target.value)}
-              placeholder="Type, paste, or browse…" />
-            <button className="ghost" onClick={() => setPickIndex(i)}>Browse…</button>
+      {fields.map(([label, value, setValue, hint, key], i) => {
+        const dyn = p.dynamicDirs[key]
+        const checked = dynamicEnabled && dyn.enabled
+        return (
+          <div key={label}>
+            <label className="field-label" title={hint}>{label} ⓘ</label>
+            <div className="pick-row">
+              <input type="text" value={value} onChange={(e) => setValue(e.target.value)}
+                placeholder="Type, paste, or browse…" />
+              <button className="ghost" onClick={() => setPickIndex(i)}>Browse…</button>
+            </div>
+            <div className="dynamic-row">
+              <label className={`pill-check${checked ? ' on' : ''}`}
+                title={'Only available when n (image count) is greater than 1. When checked, each '
+                  + `generation uses a numbered subfolder of the ${label.toLowerCase()}: <Start>, `
+                  + '<Start+1>, ... up to <Range>, then cycles back to Start '
+                  + '(e.g. Start 2, Range 5: folders 2, 3, 4, 5, 2, ...).'}>
+                <input type="checkbox" checked={checked} disabled={!dynamicEnabled}
+                  onChange={(e) => setDynamic(key, { enabled: e.target.checked })} /> Dynamic
+              </label>
+              {checked && (
+                <label className="dynamic-range"
+                  title="First subfolder number to use (natural number, default 1). Use it to resume a batch without redoing the first folders.">
+                  Start:
+                  <input type="text" inputMode="numeric" value={dyn.start} aria-label={`${label} Dynamic start`}
+                    onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setDynamic(key, { start: e.target.value }) }} />
+                </label>
+              )}
+              {checked && (
+                <label className="dynamic-range"
+                  title="Last subfolder number to use before cycling back to Start. Required when Dynamic is checked (natural number > Start).">
+                  Range:
+                  <input type="text" inputMode="numeric" value={dyn.range} aria-label={`${label} Dynamic range`}
+                    onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setDynamic(key, { range: e.target.value }) }} />
+                </label>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
       <div className="hint">Browse navigates folders on this machine (the app runs locally).</div>
       {pickIndex !== null && (
         <FolderPicker
@@ -59,10 +98,13 @@ function FolderPicker({ initial, title, onPick, onClose }: {
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
 
-  async function load(target: string) {
+  async function load(target: string, warnMissing = false) {
     setError('')
     try {
       const res = await api.browse(target)
+      if (warnMissing && res.missing) {
+        setError(`Folder does not exist: ${target} — opened the nearest existing parent.`)
+      }
       setPath(res.path)
       setParent(res.parent)
       setHome(res.home)
@@ -73,7 +115,7 @@ function FolderPicker({ initial, title, onPick, onClose }: {
   }
 
   // Load once on open: current value, else home.
-  useEffect(() => { void load(initial.trim() || '~') }, [])
+  useEffect(() => { void load(initial.trim() || '~', initial.trim() !== '') }, [])
 
   async function onMkdir() {
     if (!path || !newName.trim()) return

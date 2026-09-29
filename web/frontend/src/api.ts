@@ -26,6 +26,11 @@ export interface AppConfig {
   dry_run: boolean
 }
 
+// Dynamic dirs: generations use <dir>/<start>..<dir>/<range>, cycling back to
+// start (only when count > 1). Empty start = 1.
+export type DynamicKey = 'output_dir' | 'context_dir' | 'memory_dir'
+export type DynamicDirs = Record<DynamicKey, { enabled: boolean; start: string; range: string }>
+
 export interface LogResponse {
   rows: Record<string, string>[]
   total_ops: number
@@ -35,11 +40,11 @@ export interface LogResponse {
 
 export interface JobDone {
   status: 'done'
-  result: { images: string[]; elapsed: number; cost: number; log_path: string; total_ops: number; total_cost: number }
+  result: { images: string[]; elapsed: number; cost: number; log_path: string; log_dirs: string[]; total_ops: number; total_cost: number }
 }
 
 export type JobEvent =
-  | { status: 'running'; elapsed: number }
+  | { status: 'running'; elapsed: number; progress?: { done: number; total: number; log_dirs: string[] } }
   | JobDone
   | { status: 'cancelled' }
   | { status: 'error'; error: string }
@@ -61,8 +66,10 @@ export const api = {
   config: () => req<AppConfig>('/api/config'),
   saveConfig: (cfg: Partial<AppConfig>) =>
     req<AppConfig>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),
-  log: (outputDir: string) =>
-    req<LogResponse>(`/api/log?output_dir=${encodeURIComponent(outputDir)}`),
+  // Rows come newest first; extraDirs adds a batch's Dynamic output logs.
+  log: (outputDir: string, extraDirs: string[] = []) =>
+    req<LogResponse>(`/api/log?output_dir=${encodeURIComponent(outputDir)}`
+      + extraDirs.map((d) => `&extra_dir=${encodeURIComponent(d)}`).join('')),
   keys: () => req<Record<string, { configured: boolean; source: string | null; vault_dir: string }>>('/api/keys'),
   rememberKey: (provider: string, apiKey: string) =>
     req<{ saved: string }>(`/api/keys/${provider}`, { method: 'PUT', body: JSON.stringify({ api_key: apiKey }) }),
@@ -75,7 +82,7 @@ export const api = {
   imageUrl: (outputDir: string, name: string) =>
     `/api/images?output_dir=${encodeURIComponent(outputDir)}&name=${encodeURIComponent(name)}`,
   browse: (path: string) =>
-    req<{ path: string; parent: string; home: string; dirs: string[] }>(
+    req<{ path: string; missing: boolean; parent: string; home: string; dirs: string[] }>(
       `/api/browse?path=${encodeURIComponent(path)}`),
   mkdir: (path: string, name: string) =>
     req<{ path: string }>('/api/browse/mkdir', { method: 'POST', body: JSON.stringify({ path, name }) }),

@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -53,6 +53,9 @@ class GenerateRequest(BaseModel):
     seed: int | None = None
     count: int = 1
     injection: list[dict[str, str]] = []
+    # {"output_dir"|"context_dir"|"memory_dir": range | {"start", "range"}};
+    # see ig.check_dynamic_dirs
+    dynamic_dirs: dict[str, str | int | dict[str, str | int | None]] = {}
     dry_run: bool = False
     api_key: str | None = None
     remember_key: bool = False
@@ -95,8 +98,15 @@ def _job_or_404(job_id: str) -> dict:
 
 def _run_job(job_id: str, prompts: list[str], kwargs: dict) -> None:
     job = _job_or_404(job_id)
+
+    def on_progress(info: dict) -> None:
+        # Streamed over SSE so the frontend refreshes the log per image.
+        with JOBS_LOCK:
+            job["progress"] = {"done": info["done"], "total": info["total"],
+                               "log_dirs": [str(Path(p).parent) for p in info["log_paths"]]}
+
     try:
-        result = ig.run_generation_batch(prompts, **kwargs)
+        result = ig.run_generation_batch(prompts, on_progress=on_progress, **kwargs)
     except ig.GenerationCancelled:
         with JOBS_LOCK:
             job["status"] = "cancelled"
@@ -112,6 +122,8 @@ def _run_job(job_id: str, prompts: list[str], kwargs: dict) -> None:
                 "elapsed": result["elapsed"],
                 "cost": result["cost"],
                 "log_path": result["log_path"],
+                "log_dirs": [str(Path(p).parent)
+                             for p in result.get("log_paths") or [result["log_path"]]],
                 "total_ops": result["total_ops"],
                 "total_cost": result["total_cost"],
             }
@@ -159,9 +171,16 @@ def api_generate(req: GenerateRequest) -> dict:
         raise HTTPException(
             400, "prompt has {{variables}} and count > 1: send the injection table "
                  "(one row per generation)")
+    try:
+        ig.check_dynamic_dirs(req.dynamic_dirs, {"output_dir": str(out),
+                                                 "context_dir": req.context_dir,
+                                                 "memory_dir": req.memory_dir}, count)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     cancel_event = threading.Event()
     job_id = uuid.uuid4().hex
     kwargs = {
+        "dynamic_dirs": dict(req.dynamic_dirs),
         "output_dir": str(out),
         "context_dir": req.context_dir or None,
         "memory_dir": req.memory_dir or None,
@@ -232,16 +251,20 @@ def api_image(output_dir: str, name: str):
 
 
 @app.get("/api/log")
-def api_log(output_dir: str | None = None) -> dict:
-    log_path = _safe_output_dir(output_dir) / ig.LOG_FILENAME
-    rows = ig.read_log_rows(log_path) if log_path.exists() else []
+def api_log(output_dir: str | None = None,
+            extra_dir: list[str] = Query(default=[])) -> dict:
+    """Log rows newest first; extra_dir adds the logs of a batch's Dynamic
+    output subfolders to the same list."""
+    log_paths = [_safe_output_dir(output_dir) / ig.LOG_FILENAME]
+    log_paths += [Path(d).expanduser() / ig.LOG_FILENAME for d in extra_dir]
+    rows = ig.collect_log_rows(log_paths)
     total = 0.0
     for row in rows:
         try:
             total += float(row.get("cost_usd") or 0)
         except ValueError:
             continue
-    return {"rows": rows[-500:], "total_ops": len(rows),
+    return {"rows": rows[:500], "total_ops": len(rows),
             "total_cost": round(total, 6), "fields": ig.LOG_FIELDS}
 
 
@@ -269,6 +292,7 @@ def api_browse(path: str | None = None) -> dict:
     except PermissionError as exc:
         raise HTTPException(403, "permission denied") from exc
     return {"path": str(current),
+            "missing": current != base.resolve(),
             "parent": str(current.parent),
             "home": str(Path.home()),
             "dirs": dirs}

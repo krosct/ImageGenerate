@@ -46,6 +46,7 @@ import subprocess
 import tempfile
 import wave
 import zlib
+from typing import Callable
 from pathlib import Path
 
 try:
@@ -180,11 +181,11 @@ def normalize_provider(name: str) -> str:
 
 
 MIN_COUNT = 1
-MAX_COUNT = 10
+MAX_COUNT = 30
 
 
 def parse_count(raw: str | int | None) -> int:
-    """Parse image count (natural number 1-10). Raises ValueError."""
+    """Parse image count (natural number MIN_COUNT-MAX_COUNT). Raises ValueError."""
     text = str(raw).strip() if raw is not None else ""
     if not re.fullmatch(r"[0-9]+", text):
         raise ValueError(f"invalid count: {raw!r} (need a natural number {MIN_COUNT}-{MAX_COUNT})")
@@ -216,11 +217,13 @@ def _require_fernet() -> None:
         raise RuntimeError("remembered keys need 'pip install cryptography'")
 
 
-def save_remembered_key(provider: str, api_key: str) -> Path:
-    """Encrypt and store provider key. Returns the blob path."""
+def _vault_save(slot: str, api_key: str) -> Path:
+    """Encrypt and store a key under a vault slot name. Returns the blob path.
+
+    Slots are provider slugs here; story_generate.py adds its own (e.g. fishaudio).
+    """
     _require_fernet()
-    provider = normalize_provider(provider)
-    fkey_path, blob_path = _vault_paths(provider)
+    fkey_path, blob_path = _vault_paths(slot)
     fkey_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(fkey_path.parent, 0o700)
@@ -240,11 +243,10 @@ def save_remembered_key(provider: str, api_key: str) -> Path:
     return blob_path
 
 
-def load_remembered_key(provider: str) -> str | None:
-    """Decrypt and return the stored provider key, or None if absent."""
+def _vault_load(slot: str) -> str | None:
+    """Decrypt and return the key stored under slot, or None if absent."""
     _require_fernet()
-    provider = normalize_provider(provider)
-    fkey_path, blob_path = _vault_paths(provider)
+    fkey_path, blob_path = _vault_paths(slot)
     if not fkey_path.exists() or not blob_path.exists():
         return None
     assert Fernet is not None
@@ -253,20 +255,36 @@ def load_remembered_key(provider: str) -> str | None:
     try:
         return Fernet(fernet_key).decrypt(token).decode("utf-8")
     except InvalidToken as exc:
-        raise RuntimeError(f"stored key for {provider} is corrupted or invalid") from exc
+        raise RuntimeError(f"stored key for {slot} is corrupted or invalid") from exc
 
 
-def forget_remembered_key(provider: str) -> bool:
-    """Delete stored key material for provider. Returns True if anything removed."""
-    provider = normalize_provider(provider)
+def _vault_forget(slot: str) -> bool:
+    """Delete key material stored under slot. Returns True if anything removed."""
     removed = False
-    for path in _vault_paths(provider):
+    for path in _vault_paths(slot):
         try:
             path.unlink()
             removed = True
         except FileNotFoundError:
             continue
     return removed
+
+
+def save_remembered_key(provider: str, api_key: str) -> Path:
+    """Encrypt and store provider key. Returns the blob path."""
+    _require_fernet()
+    return _vault_save(normalize_provider(provider), api_key)
+
+
+def load_remembered_key(provider: str) -> str | None:
+    """Decrypt and return the stored provider key, or None if absent."""
+    _require_fernet()
+    return _vault_load(normalize_provider(provider))
+
+
+def forget_remembered_key(provider: str) -> bool:
+    """Delete stored key material for provider. Returns True if anything removed."""
+    return _vault_forget(normalize_provider(provider))
 
 
 def list_remembered_providers() -> list[str]:
@@ -377,6 +395,96 @@ def sanitize_gui_config(data: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Context / memory helpers
 # ---------------------------------------------------------------------------
+
+def nearest_existing_dir(path: str | os.PathLike | None) -> Path | None:
+    """Return path if it is an existing directory, else its nearest existing
+    ancestor directory (None for an empty path or when nothing exists)."""
+    text = str(path or "").strip()
+    if not text:
+        return None
+    current = Path(text).expanduser()
+    while True:
+        if current.is_dir():
+            return current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+# Dynamic dirs: generation i (0-based) uses <base>/<start + i % (range - start + 1)>,
+# i.e. folders start..range, cycling back to start. With start=1, range=5
+# generations 1..5 use folders 1..5 and generation 6 uses folder 1 again.
+DYNAMIC_DIR_KEYS = ("output_dir", "context_dir", "memory_dir")
+
+
+def parse_dynamic_start(raw: str | int | None, label: str = "Dynamic") -> int:
+    """Parse a Dynamic dir start folder (natural number >= 1; empty -> 1)."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return 1
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise ValueError(f"invalid {label} start: {raw!r} (need a natural number >= 1)")
+    return int(text)
+
+
+def parse_dynamic_range(raw: str | int | None, label: str = "Dynamic", start: int = 1) -> int:
+    """Parse a Dynamic dir range = last folder (natural number > start). Raises ValueError."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        raise ValueError(f"{label} range is empty (need a natural number > {start})")
+    if not re.fullmatch(r"[0-9]+", text) or int(text) <= start:
+        raise ValueError(f"invalid {label} range: {raw!r} (need a natural number > "
+                         f"{'start ' if start != 1 else ''}{start})")
+    return int(text)
+
+
+def parse_dynamic_spec(raw: object, label: str = "Dynamic") -> tuple[int, int]:
+    """Parse one Dynamic spec into (start, range).
+
+    Accepts a plain range (str/int, start 1) or a dict {"start": ..., "range": ...}.
+    """
+    if isinstance(raw, dict):
+        start = parse_dynamic_start(raw.get("start"), label)
+        return start, parse_dynamic_range(raw.get("range"), label, start)
+    return 1, parse_dynamic_range(raw, label)  # type: ignore[arg-type]
+
+
+def dynamic_dir_for(base: str, dir_range: int, index: int, start: int = 1) -> str:
+    """Subfolder used by generation `index` (0-based): <base>/<start>..<base>/<range>, cycling."""
+    return str(Path(base).expanduser() / str(start + index % (dir_range - start + 1)))
+
+
+def check_dynamic_dirs(dynamic_dirs: dict | None, dirs: dict,
+                       total: int) -> dict[str, tuple[int, int]]:
+    """Validate {dir_key: spec} (see parse_dynamic_spec) against the base dirs
+    and the generation total.
+
+    Returns {dir_key: (start, range)}. Raises ValueError (bad key/start/range,
+    missing base folder, total <= 1) or FileNotFoundError (context/memory
+    subfolders that the batch would need but do not exist; output subfolders
+    are created).
+    """
+    parsed: dict[str, tuple[int, int]] = {}
+    for key, raw in (dynamic_dirs or {}).items():
+        if key not in DYNAMIC_DIR_KEYS:
+            raise ValueError(f"unknown dynamic dir: {key!r} (use {', '.join(DYNAMIC_DIR_KEYS)})")
+        label = key.replace("_dir", "").capitalize() + " dir Dynamic"
+        start, dir_range = parse_dynamic_spec(raw, label)
+        if total <= 1:
+            raise ValueError(f"{label} needs more than one generation (count > 1)")
+        base = str(dirs.get(key) or "").strip()
+        if not base:
+            raise ValueError(f"{label} needs a base folder")
+        if key != "output_dir":
+            needed = [dynamic_dir_for(base, dir_range, i, start)
+                      for i in range(min(total, dir_range - start + 1))]
+            missing = [path for path in needed if not Path(path).is_dir()]
+            if missing:
+                raise FileNotFoundError(
+                    f"{label}: subfolder(s) not found: {', '.join(missing)}")
+        parsed[key] = (start, dir_range)
+    return parsed
+
 
 def load_context_text(context_dir: str | None) -> str:
     """Read all .md/.txt files from context dir, concatenated with headers."""
@@ -999,6 +1107,30 @@ _CAPABILITY_MISMATCH_MARKERS = (
 )
 
 
+# Hard API ceilings for images per call ("n"), independent of the model
+# (OpenRouter validates n <= 10 before routing; OpenAI documents 1-10).
+# Larger counts are split by _fan_out_requests into several calls.
+OPENROUTER_MAX_N = 10
+OPENAI_MAX_N = 10
+
+# The Zod issues arrive JSON-encoded inside a JSON string, so quotes may be
+# escaped (\") and newlines may be literal "\n" sequences.
+_ESC_WS = r'(?:\s|\\n)*'
+_N_TOO_BIG_MAX = re.compile(r'\\*"maximum\\*"' + _ESC_WS + ':' + _ESC_WS + r'(\d+)')
+_N_TOO_BIG_PATH = re.compile(r'\\*"path\\*"' + _ESC_WS + ':' + _ESC_WS + r'\['
+                             + _ESC_WS + r'\\*"n\\*"' + _ESC_WS + r'\]')
+
+
+def _n_limit_from_error(raw: str) -> int | None:
+    """Max images per call from a router validation error on "n"
+    (ZodError too_big, e.g. ... "maximum": 10 ... "path": ["n"]), else None."""
+    text = raw or ""
+    if "too_big" not in text or not _N_TOO_BIG_PATH.search(text):
+        return None
+    match = _N_TOO_BIG_MAX.search(text)
+    return max(1, int(match.group(1))) if match else None
+
+
 def _is_capability_mismatch(status: int, raw: str) -> bool:
     """Detect router rejections for parameters no endpoint supports (HTTP 400)."""
     if status != 400:
@@ -1325,12 +1457,14 @@ def request_openrouter(
     headers = _openrouter_headers(api_key)
     caps = _model_capabilities(model, api_key, cancel_event)
     last_error: Exception | None = None
+    n_limit = OPENROUTER_MAX_N
     for attempt in (0, 1):
         body = _adapt_image_body(dict(base), caps)
         send_seed = seed is not None and "seed" in body
         max_n = _cap_max(caps, "n") if caps else None
         if max_n is None:
             max_n = int(body.get("n", 1) or 1)
+        max_n = max(1, min(max_n, n_limit))
 
         def single(n: int, index: int) -> tuple[dict, int | None]:
             one = dict(body)
@@ -1356,10 +1490,16 @@ def request_openrouter(
             elapsed = time.perf_counter() - start
             return merged, start_ts, elapsed
         except RuntimeError as exc:
-            if (isinstance(exc, ContentPolicyError) or attempt == 1
-                    or not _is_capability_mismatch(400, str(exc))):
+            if isinstance(exc, ContentPolicyError) or attempt == 1:
                 raise
             last_error = exc
+            # Router says n is too big: retry split into calls of that size.
+            router_limit = _n_limit_from_error(str(exc))
+            if router_limit is not None and router_limit < max_n:
+                n_limit = router_limit
+                continue
+            if not _is_capability_mismatch(400, str(exc)):
+                raise
             caps = _model_capabilities(model, api_key, cancel_event, refresh=True)
             if not caps:
                 raise last_error
@@ -1448,7 +1588,7 @@ def request_openai(
     if seed is not None:
         print(f"warning: modelo {model!r} via OpenAI não suporta seed; "
               "a seed pedida foi ignorada", file=sys.stderr)
-    per_call = 1 if model.startswith(OPENAI_DALLE3_PREFIX) else max(1, count)
+    per_call = 1 if model.startswith(OPENAI_DALLE3_PREFIX) else min(max(1, count), OPENAI_MAX_N)
     body: dict = {
         "model": model,
         "prompt": prompt,
@@ -1721,6 +1861,35 @@ def read_log_rows(log_path: Path) -> list[dict]:
     return rows
 
 
+def _log_row_timestamp(row: dict) -> float:
+    try:
+        return dt.datetime.fromisoformat(str(row.get("date") or "")).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return float("-inf")
+
+
+def sort_log_rows_newest_first(rows: list[dict]) -> list[dict]:
+    """Order log rows by date, newest first (ties keep reverse file order,
+    so the last appended row of a batch stays on top)."""
+    return sorted(reversed(rows), key=_log_row_timestamp, reverse=True)
+
+
+def collect_log_rows(log_paths: list[Path]) -> list[dict]:
+    """Read and merge several CSV logs (duplicates skipped), newest first."""
+    rows: list[dict] = []
+    seen: set[Path] = set()
+    for log_path in log_paths:
+        try:
+            key = Path(log_path).expanduser().resolve()
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.extend(read_log_rows(key))
+    return sort_log_rows_newest_first(rows)
+
+
 def write_log(log_path: Path, rows: list[dict]) -> tuple[int, float]:
     total_cost = 0.0
     for row in rows:
@@ -1965,31 +2134,59 @@ def run_generation(
     }
 
 
-def run_generation_batch(prompts: list[str], **kwargs: object) -> dict:
+def run_generation_batch(prompts: list[str], dynamic_dirs: dict | None = None,
+                         on_progress: Callable[[dict], None] | None = None,
+                         **kwargs: object) -> dict:
     """Run one generation per prompt (Injection mode). Aggregates the results.
 
     kwargs are forwarded to run_generation(); a "count" key is overridden
     to 1 per prompt. Shares the cancel_event: cancelling aborts the whole
     batch, removes partial files and logs nothing.
+
+    dynamic_dirs ({dir_key: range or {"start", "range"}}, see
+    check_dynamic_dirs) makes generation i use <base>/<start + i % (range -
+    start + 1)> for that dir. With a single prompt it is
+    repeated kwargs["count"] times (one call each, seed + i like the
+    provider fan-out) so every generation can use its own folders.
+
+    on_progress (optional) is called after each finished generation of a
+    multi-generation batch with {"done", "total", "images", "log_paths"}
+    (already logged to CSV), so UIs can refresh the log live.
     """
-    if len(prompts) <= 1:
+    total = len(prompts) if len(prompts) > 1 else int(kwargs.get("count") or 1)  # type: ignore[call-overload]
+    dynamic = check_dynamic_dirs(dynamic_dirs, kwargs, total) if dynamic_dirs else {}
+    if len(prompts) <= 1 and not dynamic:
         return run_generation(prompt=prompts[0], **kwargs)  # type: ignore[arg-type]
+    repeated = len(prompts) <= 1
+    if repeated:
+        prompts = prompts * total
+    seed = kwargs.get("seed")
     images: list[str] = []
     entries: list[dict] = []
+    log_paths: list[str] = []
     total_cost = 0.0
     total_elapsed = 0.0
-    log_path = ""
-    for one_prompt in prompts:
-        result = run_generation(prompt=one_prompt, **{**kwargs, "count": 1})  # type: ignore[arg-type]
+    for index, one_prompt in enumerate(prompts):
+        overrides: dict = {"count": 1}
+        for key, (start, dir_range) in dynamic.items():
+            overrides[key] = dynamic_dir_for(str(kwargs[key]), dir_range, index, start)
+        if repeated and isinstance(seed, int):
+            overrides["seed"] = seed + index
+        result = run_generation(prompt=one_prompt, **{**kwargs, **overrides})  # type: ignore[arg-type]
         images.extend(result["images"])
         entries.extend(result["entries"])
         total_cost += result["cost"]
         total_elapsed += result["elapsed"]
-        log_path = result["log_path"]
+        if result["log_path"] not in log_paths:
+            log_paths.append(result["log_path"])
+        if on_progress is not None:
+            on_progress({"done": index + 1, "total": len(prompts),
+                         "images": list(images), "log_paths": list(log_paths)})
     return {
         "images": images,
         "entries": entries,
-        "log_path": log_path,
+        "log_path": log_paths[-1] if log_paths else "",
+        "log_paths": log_paths,
         "elapsed": total_elapsed,
         "cost": total_cost,
         "total_ops": len(entries),
@@ -2032,6 +2229,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Directory to save images + CSV log (default: ImageGenerate in user pictures folder).")
     parser.add_argument("--context-dir", default="", help="Directory with .md/.txt context files.")
     parser.add_argument("--memory-dir", default="", help="Directory with reference images.")
+    for name in ("output", "context", "memory"):
+        parser.add_argument(f"--dynamic-{name}", dest=f"dynamic_{name}", default=None,
+                            metavar="RANGE",
+                            help=f"Dynamic {name} dir (needs --count > 1 or several "
+                                 f"--inject): generations use <{name}-dir>/START.."
+                                 f"<{name}-dir>/RANGE in order, cycling back to START "
+                                 "(RANGE = last folder, natural number > START).")
+        parser.add_argument(f"--dynamic-{name}-start", dest=f"dynamic_{name}_start",
+                            default=None, metavar="START",
+                            help=f"First folder of --dynamic-{name} (default: 1).")
     parser.add_argument("--model", default=None,
                         help="Image model slug (default: provider default model).")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER, choices=sorted(PROVIDERS),
@@ -2139,6 +2346,18 @@ def main_cli(args: argparse.Namespace) -> int:
               "'name=value,…' option per generation (or use the GUI Injection tab)",
               file=sys.stderr)
         return 2
+    dynamic_dirs = {f"{name}_dir": {"start": getattr(args, f"dynamic_{name}_start", None),
+                                    "range": getattr(args, f"dynamic_{name}", None)}
+                    for name in ("output", "context", "memory")
+                    if getattr(args, f"dynamic_{name}", None) is not None
+                    or getattr(args, f"dynamic_{name}_start", None) is not None}
+    try:
+        check_dynamic_dirs(dynamic_dirs, {"output_dir": output_dir,
+                                          "context_dir": args.context_dir,
+                                          "memory_dir": args.memory_dir}, count)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     started = time.strftime("%Y-%m-%d %H:%M:%S")
     model = args.model or PROVIDERS[provider]["default_model"]
     print(f"[{started}] requesting provider={provider} model={model} "
@@ -2156,6 +2375,7 @@ def main_cli(args: argparse.Namespace) -> int:
     try:
         result = run_generation_batch(
             prompts,
+            dynamic_dirs=dynamic_dirs,
             output_dir=output_dir,
             context_dir=args.context_dir or None,
             memory_dir=args.memory_dir or None,
@@ -2179,6 +2399,8 @@ def main_cli(args: argparse.Namespace) -> int:
     print(f"done in {result['elapsed']:.1f}s (cli measured {time.perf_counter() - t0:.1f}s)")
     for image in result["images"]:
         print(f"saved: {image}")
+    for extra_log in result.get("log_paths", [])[:-1]:
+        print(f"log: {extra_log}")
     print(f"log: {result['log_path']} | ops={result['total_ops']} total_cost=${result['total_cost']:.6f}")
     return 0
 
@@ -2226,7 +2448,7 @@ def run_gui(defaults: dict | None = None) -> None:
     # Brand logo (img/logo.png next to this file): window icon + header.
     # Missing/corrupt file -> plain text header, never blocks startup.
     state: dict = {"running": False, "start": 0.0, "elapsed": 0.0, "after_id": None,
-                   "logo_img": None}
+                   "logo_img": None, "batch_logs": []}
     try:
         _logo_path = Path(__file__).resolve().parent / "img/logo.png"
         if _logo_path.is_file():
@@ -2267,7 +2489,18 @@ def run_gui(defaults: dict | None = None) -> None:
     ttk.Button(header, text="?", width=3, command=open_docs, style="Help.TButton").pack(side=tk.RIGHT)
 
     def pick_dir(var: tk.StringVar) -> None:
-        chosen = filedialog.askdirectory()
+        """Open the folder dialog at the typed folder; if it does not exist,
+        warn and open at its nearest existing parent (empty -> dialog default)."""
+        typed = var.get().strip()
+        start = nearest_existing_dir(typed)
+        if typed and (start is None or start != Path(typed).expanduser()):
+            messagebox.showerror(
+                "Folder not found",
+                f"Folder does not exist:\n{typed}\n\n"
+                + (f"Opening the nearest existing parent:\n{start}" if start
+                   else "Opening the default folder."))
+        options = {"initialdir": str(start)} if start else {}
+        chosen = filedialog.askdirectory(**options)
         if chosen:
             var.set(chosen)
 
@@ -2380,9 +2613,21 @@ def run_gui(defaults: dict | None = None) -> None:
     tab_model.columnconfigure(1, weight=1)
 
     # ---- Dir tab: output / context / memory dirs ----
+    # Each dir has a "Dynamic" checkbox below it (enabled only when n > 1);
+    # when checked Start (default 1) and Range entries appear and the
+    # generations use <dir>/<start>..<dir>/<range>, cycling back to start.
     dir_entries: dict = {}
+    dynamic_widgets: dict = {}
     drow = 0
-    for label, var in (("Output dir:", out_var), ("Context dir:", ctx_var), ("Memory dir:", mem_var)):
+
+    def digits_entry(parent: ttk.Frame, variable: tk.StringVar) -> ttk.Entry:
+        return ttk.Entry(parent, textvariable=variable, width=6, validate="key",
+                         validatecommand=(root.register(
+                             lambda v: v == "" or v.isdigit()), "%P"))
+
+    for label, var, key in (("Output dir:", out_var, "output_dir"),
+                            ("Context dir:", ctx_var, "context_dir"),
+                            ("Memory dir:", mem_var, "memory_dir")):
         ttk.Label(tab_dir, text=label).grid(row=drow, column=0, sticky=tk.W, padx=4, pady=2)
         entry = ttk.Entry(tab_dir, textvariable=var, width=60)
         entry.grid(row=drow, column=1, sticky=tk.EW, padx=4)
@@ -2390,8 +2635,66 @@ def run_gui(defaults: dict | None = None) -> None:
         ttk.Button(tab_dir, text="Browse", command=lambda v=var: pick_dir(v)).grid(
             row=drow, column=2, padx=4
         )
-        drow += 1
+        dyn_row = ttk.Frame(tab_dir)
+        dyn_row.grid(row=drow + 1, column=1, sticky=tk.W, padx=4, pady=(0, 6))
+        dyn_var = tk.BooleanVar(value=False)
+        start_var = tk.StringVar(value="1")
+        range_var = tk.StringVar(value="")
+        dyn_check = ttk.Checkbutton(dyn_row, text="Dynamic", variable=dyn_var,
+                                    state=tk.DISABLED)
+        dyn_check.pack(side=tk.LEFT)
+        start_label = ttk.Label(dyn_row, text="Start:")
+        start_entry = digits_entry(dyn_row, start_var)
+        range_label = ttk.Label(dyn_row, text="Range:")
+        range_entry = digits_entry(dyn_row, range_var)
+        dynamic_widgets[key] = {"var": dyn_var, "start": start_var, "range": range_var,
+                                "check": dyn_check,
+                                "fields": ((start_label, start_entry), (range_label, range_entry)),
+                                "name": label.rstrip(":")}
+
+        def toggle_range(w: dict = dynamic_widgets[key]) -> None:
+            for field_label, field_entry in w["fields"]:
+                if w["var"].get():
+                    field_label.pack(side=tk.LEFT, padx=(12, 4))
+                    field_entry.pack(side=tk.LEFT)
+                else:
+                    field_label.pack_forget()
+                    field_entry.pack_forget()
+
+        dyn_var.trace_add("write", lambda *_a, f=toggle_range: f())
+        folder = label.rstrip(":").lower()
+        attach_help(dyn_check,
+                    "Only available when n (image count) is greater than 1. "
+                    f"When checked, each generation uses a numbered subfolder of the {folder}: "
+                    f"<{folder}>/<Start>, <Start+1>, ... up to <Range>, then cycles back to Start "
+                    "(e.g. Start 2, Range 5: folders 2, 3, 4, 5, 2, ...).")
+        attach_help(start_entry,
+                    "First subfolder number to use (natural number, default 1). "
+                    "Use it to resume a batch without redoing the first folders.")
+        attach_help(range_entry,
+                    "Last subfolder number to use before cycling back to Start. "
+                    "Required when Dynamic is checked (natural number > Start).")
+        drow += 2
     tab_dir.columnconfigure(1, weight=1)
+
+    def refresh_dynamic_state() -> None:
+        """Dynamic checkboxes are enabled only while count > 1."""
+        try:
+            enabled = parse_count(count_var.get()) > 1
+        except ValueError:
+            enabled = False
+        for w in dynamic_widgets.values():
+            if enabled:
+                w["check"].configure(state=tk.NORMAL)
+            else:
+                w["var"].set(False)
+                w["check"].configure(state=tk.DISABLED)
+
+    count_var.trace_add("write", lambda *_a: refresh_dynamic_state())
+    # A new Output dir means the last batch's Dynamic logs no longer belong
+    # in the Summary list.
+    out_var.trace_add("write", lambda *_a: None if state["running"]
+                      else state.update(batch_logs=[]))
 
     # ---- Generate tab: per-generation options (not assigned to a tab
     # in the requested layout, kept here next to the prompt) ----
@@ -2626,7 +2929,7 @@ def run_gui(defaults: dict | None = None) -> None:
                 "Test run without spending anything: writes a local placeholder image "
                 "instead of calling the paid API.")
     attach_help(count_entry,
-                "How many images to generate with the same prompt (natural number 1-10). "
+                f"How many images to generate with the same prompt (natural number {MIN_COUNT}-{MAX_COUNT}). "
                 "Above 1 asks for confirmation: each image may add costs.")
     attach_help(clock_label,
                 "Time from sending the request until the image arrives.")
@@ -2648,17 +2951,22 @@ def run_gui(defaults: dict | None = None) -> None:
     log_rows_cache: list[dict] = []
 
     def refresh_log() -> None:
+        """Fill the Summary list, newest request on top. Besides the Output
+        dir log it merges the logs written by the last batch (Dynamic output
+        subfolders), so live progress shows every new image."""
         for child in tree.get_children():
             tree.delete(child)
         log_path = Path(out_var.get() or default_output_dir()) / LOG_FILENAME
-        rows = read_log_rows(log_path) if log_path.exists() else []
+        extra = [Path(p) for p in state.get("batch_logs", [])]
+        rows = collect_log_rows([log_path, *extra])
         total = 0.0
-        log_rows_cache.clear()
-        for row in rows[-500:]:
+        for row in rows:
             try:
                 total += float(row.get("cost_usd") or 0)
             except ValueError:
                 pass
+        log_rows_cache.clear()
+        for row in rows[:500]:
             values = []
             for col in columns:
                 raw = row.get(col, "") or ""
@@ -2673,7 +2981,9 @@ def run_gui(defaults: dict | None = None) -> None:
                 values.append(raw)
             tree.insert("", tk.END, values=tuple(values))
             log_rows_cache.append(row)
-        total_var.set(f"total: {len(rows)} ops / ${total:.6f}  ({log_path})")
+        extra_logs = {q.resolve() for q in extra} - {log_path.expanduser().resolve()}
+        where = f"{log_path}" + (f" + {len(extra_logs)} Dynamic log(s)" if extra_logs else "")
+        total_var.set(f"total: {len(rows)} ops / ${total:.6f}  ({where})")
 
     def use_prompt_from_list() -> None:
         selection = tree.selection()
@@ -2780,6 +3090,7 @@ def run_gui(defaults: dict | None = None) -> None:
             messagebox.showerror("Generation failed", error)
         else:
             assert result is not None
+            state["batch_logs"] = list(result.get("log_paths") or [result["log_path"]])
             clock_var.set(f"elapsed: {result['elapsed']:.1f}s (done)")
             status_var.set(f"saved {len(result['images'])} image(s) | ${result['cost']:.6f}")
             if not muted_var.get():
@@ -2797,6 +3108,14 @@ def run_gui(defaults: dict | None = None) -> None:
             root.after(0, lambda: on_done(None, message))
         else:
             root.after(0, lambda: on_done(result, None))
+
+    def on_progress(info: dict) -> None:
+        """One generation of a batch finished (already logged): refresh Summary."""
+        if not state["running"]:
+            return
+        state["batch_logs"] = list(info.get("log_paths") or [])
+        status_var.set(f"generating... {info['done']}/{info['total']} done")
+        toggle_log(True)
 
     def on_cancel() -> None:
         event = state.get("cancel_event")
@@ -2841,6 +3160,26 @@ def run_gui(defaults: dict | None = None) -> None:
                 apply_template_values(prompt, dict(zip(names, row)))
                 for row in rows
             ]
+        dynamic_dirs: dict = {}
+        for key, w in dynamic_widgets.items():
+            if count > 1 and w["var"].get():
+                spec = {"start": w["start"].get().strip(), "range": w["range"].get().strip()}
+                try:
+                    parse_dynamic_spec(spec, f"{w['name']} Dynamic")
+                except ValueError as exc:
+                    messagebox.showerror("Invalid Dynamic start/range", str(exc))
+                    return
+                dynamic_dirs[key] = spec
+        if dynamic_dirs:
+            try:
+                check_dynamic_dirs(dynamic_dirs, {
+                    "output_dir": out_var.get().strip() or default_output_dir(),
+                    "context_dir": ctx_var.get().strip(),
+                    "memory_dir": mem_var.get().strip(),
+                }, count)
+            except (ValueError, FileNotFoundError) as exc:
+                messagebox.showerror("Invalid Dynamic dir", str(exc))
+                return
         if count > 1 and not messagebox.askyesno(
             "Confirm multiple generations",
             f"Generate {count} images "
@@ -2866,6 +3205,8 @@ def run_gui(defaults: dict | None = None) -> None:
             except RuntimeError as exc:
                 messagebox.showwarning("Remember key", str(exc))
         kwargs = {
+            "dynamic_dirs": dynamic_dirs,
+            "on_progress": lambda info: root.after(0, lambda: on_progress(info)),
             "output_dir": out_var.get().strip() or default_output_dir(),
             "context_dir": ctx_var.get().strip() or None,
             "memory_dir": mem_var.get().strip() or None,
@@ -2882,6 +3223,7 @@ def run_gui(defaults: dict | None = None) -> None:
             "cancel_event": threading.Event(),
         }
         state["running"] = True
+        state["batch_logs"] = []
         state["cancel_event"] = kwargs["cancel_event"]
         state["start"] = time.perf_counter()
         persist_gui_config()

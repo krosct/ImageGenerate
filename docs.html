@@ -250,7 +250,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><th>Aba</th><th>Função</th><th>Por quê separada?</th></tr>
 <tr><td>Generate</td><td>Prompt, proporção, resolução, formato, seed, dry-run, botão Generate/Cancel, cronômetro e lista do log</td><td>É o uso diário — fica tudo à mão numa tela só</td></tr>
 <tr><td>Model</td><td>Provedor, modelo de imagem, modelo de resumo, chave + “remember me”/Forget</td><td>Configura-se uma vez e raramente se mexe</td></tr>
-<tr><td>Dir</td><td>Pastas de saída, contexto e memória (+ Browse)</td><td>Caminhos mudam por projeto, não por geração</td></tr>
+<tr><td>Dir</td><td>Pastas de saída, contexto e memória (+ Browse, que abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe existente mais próxima) + checkbox <strong>Dynamic</strong> por pasta</td><td>Caminhos mudam por projeto, não por geração</td></tr>
 <tr><td>Injection <em>(condicional)</em></td><td>Tabela de valores por geração para variáveis <code class="inline">{{nome}}</code> do prompt</td><td>Só existe quando quantidade &gt; 1 e o prompt tem variáveis</td></tr>
 </table>
 <ul>
@@ -260,6 +260,10 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Ícone no dock:</strong> a janela usa <code class="inline">img/logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
 <li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 abre confirmação avisando que cada imagem pode somar custo.</li>
 </ul>
+
+<h3 id="gui-dynamic">Dynamic (uma subpasta por geração)</h3>
+<p>Abaixo de cada pasta (Output, Context, Memory) há o checkbox <strong>Dynamic</strong>, habilitado só quando n &gt; 1 (padrão: desmarcado). Marcado, aparecem as caixas <strong>Start</strong> (primeira subpasta, natural ≥ 1, padrão 1) e <strong>Range</strong> (última subpasta, natural &gt; Start, obrigatória). As gerações usam, em ordem, <code class="inline">&lt;pasta&gt;/&lt;Start&gt;</code> … <code class="inline">&lt;pasta&gt;/&lt;Range&gt;</code> e voltam ao Start: com n=10, Context Start 1/Range 10 e Output Start 1/Range 5, a geração 6 lê <code class="inline">ctx/6</code> e salva em <code class="inline">out/1</code>. O Start serve para <strong>retomar um lote</strong> sem refazer as primeiras pastas (ex.: Memory Start 2, Range 12, n=11 → pastas 2…12). Pastas sem Dynamic ficam fixas. Subpastas de contexto/memória precisam existir (validado antes de gerar, nada é gasto); as de saída são criadas, cada uma com seu próprio CSV. Com seed definida, a geração i usa seed + i − 1.</p>
+<div class="callout tip"><span class="tag">CLI equivalente</span><code class="inline">--count 11 --dynamic-memory 12 --dynamic-memory-start 2</code> (também <code class="inline">--dynamic-output[-start]</code> e <code class="inline">--dynamic-context[-start]</code>). Na <strong>web</strong>, os mesmos campos ficam na aba Dir.</div>
 
 <h3 id="gui-injection">Aba Injection (variáveis no prompt)</h3>
 <p>Quando a quantidade é <strong>&gt; 1</strong> e o prompt contém variáveis <code class="inline">{{qualquer texto}}</code>, aparece a aba <strong style="color:#e6c600">Injection</strong> (título em amarelo). Nela há uma tabela com <strong>uma linha por geração</strong> e <strong>uma coluna por variável</strong> — preencha o valor de cada variável em cada geração:</p>
@@ -346,6 +350,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 
 <h2 id="log">Log CSV e custos</h2>
 <p><code class="inline">log_image_generate.csv</code> na pasta de saída. As 2 primeiras linhas (<code class="inline"># …</code>) trazem <strong>totais</strong> (operações e US$); depois o cabeçalho + 1 linha por imagem: data, resumo, prompt completo, arquivo, bytes, dimensões, resolução/proporção pedidas, custo, timestamps, modelo, provedor e hash da chave.</p>
+<p>O painel <strong>Summary</strong> (GUI) e o histórico da web mostram as requisições <strong>da mais nova para a mais velha</strong> e se atualizam <strong>a cada imagem gerada</strong> em lotes (Injection/Dynamic), sem esperar o fim do lote. Com Output Dynamic, os CSVs das subpastas usadas no lote entram na mesma lista (o rodapé indica <em>+ N Dynamic log(s)</em>).</p>
 <div class="callout tip"><span class="tag">Reuso</span>Na web, clicar numa linha do histórico recarrega aquele prompt. No CLI, <code class="inline">--list-log</code> despeja o CSV no terminal.</div>
 
 <h2 id="api">API do backend</h2>
@@ -371,9 +376,10 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">--prompt / --prompt-file</code></td><td>Texto do prompt (arquivo soma ao texto)</td></tr>
 <tr><td><code class="inline">--output-dir</code></td><td>Onde salvam imagens + CSV (padrão: <code class="inline">~/Imagens/ImageGenerate</code>)</td></tr>
 <tr><td><code class="inline">--context-dir / --memory-dir</code></td><td>Pastas de contexto (.md/.txt) e referências visuais</td></tr>
+<tr><td><code class="inline">--dynamic-output / --dynamic-context / --dynamic-memory RANGE</code><br><code class="inline">--dynamic-…-start START</code></td><td>Dynamic: as gerações usam <code class="inline">&lt;pasta&gt;/START</code> … <code class="inline">&lt;pasta&gt;/RANGE</code> e voltam ao START (START padrão 1; RANGE natural &gt; START; exige mais de uma geração)</td></tr>
 <tr><td><code class="inline">--provider / --model</code></td><td>Provedor e modelo de imagem</td></tr>
 <tr><td><code class="inline">--prop / --resolution / --output-format</code></td><td>Proporção, tier de resolução, formato</td></tr>
-<tr><td><code class="inline">--seed / --count</code></td><td>Seed de reprodutibilidade / nº de imagens (natural 1–10; acima de 1 pede confirmação nas interfaces por causa do custo)</td></tr>
+<tr><td><code class="inline">--seed / --count</code></td><td>Seed de reprodutibilidade / nº de imagens (natural 1–30; acima de 1 pede confirmação nas interfaces por causa do custo)</td></tr>
 <tr><td><code class="inline">--api-key / --remember-key / --forget-key</code></td><td>Chave desta vez / guardar no cofre / apagar do cofre</td></tr>
 <tr><td><code class="inline">--summary-model</code></td><td>Chat que resume o prompt (vazio = truncamento local grátis)</td></tr>
 <tr><td><code class="inline">--timeout / --dry-run</code></td><td>Timeout HTTP / placeholder local sem gastar nada</td></tr>
