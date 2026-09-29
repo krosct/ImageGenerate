@@ -24,6 +24,9 @@ export function resolveInjectionRows(cells: string[][], names: string[]): string
   )
 }
 
+export const MIN_COUNT = 1
+export const MAX_COUNT = 30
+
 export function parseCountText(countText: string): number {
   return /^[0-9]+$/.test(countText.trim()) ? parseInt(countText.trim(), 10) : 1
 }
