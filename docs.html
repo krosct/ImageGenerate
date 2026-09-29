@@ -313,7 +313,7 @@ python3 image_generate.py --analyse ./A --analyse ./B --choose 1:2 --choose 3:1 
 
 <h2 id="web">Web (navegador)</h2>
 <p>Mesmo núcleo, visual moderno escuro. Sirva o build e abra <code class="inline">http://127.0.0.1:8000</code>.</p>
-<p>Para <strong>desenvolver com hot reload</strong>, rode <code class="inline">npm run dev</code> em <code class="inline">web/frontend</code>: o Vite sobe o frontend (<code class="inline">http://127.0.0.1:5173</code>) e o backend (<code class="inline">web/server.py</code>) de uma vez, e derruba o backend ao sair. Se a porta 8000 já estiver ocupada, o backend existente é reaproveitado (<code class="inline">IMAGE_GENERATE_PYTHON</code> troca o interpretador).</p>
+<p>Para <strong>desenvolver com hot reload</strong>, rode <code class="inline">npm run dev</code> em <code class="inline">web/frontend</code>: o Vite sobe o frontend (<code class="inline">http://127.0.0.1:5173</code>) e o backend (<code class="inline">web/server.py</code>) de uma vez, e derruba o backend ao sair. A porta 8000 só é reaproveitada se já for o próprio backend; se estiver ocupada por outro app, o Vite escolhe uma porta livre (<code class="inline">IMAGE_GENERATE_PYTHON</code> troca o interpretador). O proxy de desenvolvimento encaminha <code class="inline">/api</code> e <code class="inline">/help</code>.</p>
 <p>A web tem <strong>as mesmas funções dos dois apps desktop</strong>: o seletor <strong>ImageGenerate | StoryGenerate</strong> no topo troca de app (<code class="inline">/#story</code> abre direto no StoryGenerate) e as configurações são os mesmos <code class="inline">config.json</code> / <code class="inline">story_config.json</code> — o que muda num aparece no outro.</p>
 
 <h3 id="web-generate">Aba Generate</h3>
