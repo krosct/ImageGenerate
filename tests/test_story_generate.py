@@ -949,6 +949,78 @@ class ControlsTest(IsolatedMixin):
         self.assertTrue((self.tmp / "new" / "out" / sg.LOG_FILENAME).is_file())
 
 
+class DeleteTest(IsolatedMixin):
+    """Deleting a production: whole story folder or audio only."""
+
+    def setUp(self):
+        super().setUp()
+        # never touch the real desktop Trash from tests
+        no_gio = mock.patch.object(sg.shutil, "which",
+                                   side_effect=lambda cmd: None if cmd == "gio" else "/bin/x")
+        no_gio.start()
+        self.addCleanup(no_gio.stop)
+        self.image = self.storyboard()
+        self.result = sg.generate_story(self.image, output_dir=str(self.tmp / "out"),
+                                        voices=[], dry_run=True)
+        self.folder = Path(self.result["folder"])
+        self.log = self.tmp / "out" / sg.LOG_FILENAME
+
+    def test_delete_whole_production_keeps_original(self):
+        self.assertEqual(sg.delete_story(self.folder), "deleted")
+        self.assertFalse(self.folder.exists())
+        self.assertTrue(self.image.is_file())  # original storyboard untouched
+        self.assertEqual(sg.read_log_rows(self.log)[-1]["status"], "deleted")
+        self.assertEqual(sg.failed_storyboards(self.tmp / "out"), [])
+        again = sg.generate_story(self.image, output_dir=str(self.tmp / "out"), voices=[],
+                                  dry_run=True)
+        self.assertFalse(again["skipped"])  # no story anymore -> written again
+
+    def test_delete_audio_only(self):
+        sg.delete_story(self.folder, audio_only=True)
+        self.assertFalse((self.folder / sg.AUDIO_WAV).exists())
+        self.assertTrue((self.folder / sg.SCRIPT_MD).is_file())
+        self.assertTrue(sg.load_story_meta(self.folder)["audio_deleted"])
+        self.assertEqual(sg.read_log_rows(self.log)[-1]["status"], "no audio")
+        self.assertTrue(sg.generate_story(self.image, output_dir=str(self.tmp / "out"),
+                                          voices=[], dry_run=True)["skipped"])
+        with self.assertRaisesRegex(FileNotFoundError, "no audio anymore"):
+            sg.delete_story(self.folder, audio_only=True)
+
+    def test_error_rows_are_not_relabelled(self):
+        sg.log_failure(self.tmp / "out", self.image, "boom", {})
+        rows = sg.read_log_rows(self.log)
+        rows[-1]["folder"] = self.folder.name  # an error row sharing the name
+        sg.write_log_rows(self.log, rows)
+        sg.delete_story(self.folder)
+        statuses = [r["status"] for r in sg.read_log_rows(self.log)]
+        self.assertEqual(statuses, ["deleted", "error"])
+
+    def test_not_a_story_folder(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        with self.assertRaisesRegex(ValueError, "not a story folder"):
+            sg.delete_story(other)
+
+    def test_trash_when_gio_is_available(self):
+        def fake_gio(cmd, **kwargs):
+            sg.shutil.rmtree(cmd[-1])  # what "gio trash" does from our point of view
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(sg.shutil, "which", return_value="/usr/bin/gio"), \
+                mock.patch.object(sg.subprocess, "run", side_effect=fake_gio) as run:
+            self.assertEqual(sg.delete_story(self.folder), "trash")
+        self.assertEqual(run.call_args[0][0][:2], ["gio", "trash"])
+
+    def test_cli_delete(self):
+        args = sg.build_parser().parse_args(["--delete", str(self.folder), "--audio-only"])
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(sg.main_cli(args), 0)
+        self.assertIn("deleted: audio of", out.getvalue())
+        args = sg.build_parser().parse_args(["--delete", str(self.tmp / "nope")])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(sg.main_cli(args), 2)
+
+
 class CliTest(IsolatedMixin):
 
     def args(self, **over) -> argparse.Namespace:

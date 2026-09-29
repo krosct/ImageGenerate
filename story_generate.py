@@ -1546,6 +1546,59 @@ def run_story_batch(
             "cost": sum(r.get("cost", 0.0) for r in results)}
 
 
+def _trash_or_delete(path: Path) -> str:
+    """Move path to the desktop Trash (gio) so it can be restored; if that is
+    not possible, delete it. Returns "trash" or "deleted"."""
+    if shutil.which("gio"):
+        try:
+            subprocess.run(["gio", "trash", str(path)], capture_output=True, timeout=30,
+                           check=True)
+            if not path.exists():
+                return "trash"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    return "deleted"
+
+
+def delete_story(folder: str | Path, audio_only: bool = False) -> str:
+    """Remove a production: the whole story folder (script, audio, story.json
+    and the storyboard *copy*) or only its audio. The original storyboard in
+    the input dir is never touched. The log row of the story is marked
+    (status "deleted" / "no audio"). Returns "trash" or "deleted".
+    Raises FileNotFoundError / ValueError for a folder that is not a story.
+    """
+    folder = Path(folder).expanduser()
+    meta = load_story_meta(folder)
+    if meta is None:
+        raise ValueError(f"not a story folder (no {STORY_JSON}): {folder}")
+    log_path = folder.parent / LOG_FILENAME
+    with _LOG_LOCK:
+        if audio_only:
+            audio = folder / str(meta.get("audio") or AUDIO_WAV)
+            if not audio.is_file():
+                raise FileNotFoundError(f"this story has no audio anymore: {audio}")
+            method = _trash_or_delete(audio)
+            meta["audio_deleted"] = True
+            (folder / STORY_JSON).write_text(json.dumps(meta, indent=2, ensure_ascii=False)
+                                             + "\n", encoding="utf-8")
+            new_status = "no audio"
+        else:
+            method = _trash_or_delete(folder)
+            new_status = "deleted"
+        rows = read_log_rows(log_path)
+        for row in reversed(rows):
+            if row.get("folder") == folder.name and (row.get("status") or "ok") != "error":
+                row["status"] = new_status
+                break
+        if rows:
+            write_log_rows(log_path, rows)
+    return method
+
+
 def update_log_tts_cost(log_path: Path, folder_name: str, cost: float) -> None:
     """Fill tts_cost_usd of the log row for folder_name (totals recomputed)."""
     with _LOG_LOCK:
@@ -1800,6 +1853,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Target narration length, e.g. 90, 1:30 or 2m (empty = "
                              "automatic). Converted to words per voice with the speech "
                              "speed measured on your previous stories.")
+    parser.add_argument("--delete", default="", metavar="FOLDER",
+                        help="Delete a produced story folder (script + audio; moved to the "
+                             "Trash when possible). The original storyboard is kept.")
+    parser.add_argument("--audio-only", action="store_true",
+                        help="With --delete: remove only the audio of that story.")
     parser.add_argument("--retry-failed", action="store_true",
                         help="Redo only the storyboards whose last attempt failed "
                              "(read from the log of the output dir).")
@@ -1899,6 +1957,16 @@ def main_cli(args: argparse.Namespace) -> int:
             return 2
     if args.play:
         return play_in_terminal(Path(args.play).expanduser())
+    if args.delete:
+        try:
+            method = delete_story(args.delete, audio_only=args.audio_only)
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        what = "audio of" if args.audio_only else "story"
+        print(f"{'moved to the Trash' if method == 'trash' else 'deleted'}: {what} "
+              f"{Path(args.delete).expanduser()}")
+        return 0
     if args.list:
         stories = list_stories(settings["output_dir"])
         if not stories:
@@ -2176,7 +2244,7 @@ def run_gui(defaults: dict | None = None) -> None:
               "writer_cost_usd": 68, "tts_cost_usd": 80, "detail": 250}
     # Treeview cells are single-line: columns auto-fit their content (with a
     # horizontal scrollbar); right-click -> "Copy row" copies a row in full.
-    max_widths = {"title": 320, "voice_label": 200, "detail": 1400}
+    max_widths = {"title": 320, "voice_label": 200, "detail": 1400 // 3}  # full text: tooltip / Copy row
     tree_frame = ttk.Frame(log_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
     tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
@@ -2260,7 +2328,9 @@ def run_gui(defaults: dict | None = None) -> None:
             values = []
             for col in columns:
                 if col == "status":
-                    values.append("✖ error" if failed else "✔ ok")
+                    values.append({"error": "✖ error", "deleted": "🗑 deleted",
+                                   "no audio": "🔇 no audio"}.get(row.get("status") or "ok",
+                                                                 "✔ ok"))
                 elif col == "date":
                     values.append((row.get("date") or "")[5:16].replace("T", " "))
                 elif col == "title":
@@ -2278,7 +2348,7 @@ def run_gui(defaults: dict | None = None) -> None:
         failures = len(failed_now)
         retry_btn.configure(text=f"Retry failed ({failures})" if failures else "Retry failed",
                             state=tk.NORMAL if failures and not state["running"] else tk.DISABLED)
-        total_var.set(f"total: {sum(1 for r in rows if r.get('status') != 'error')} stories, "
+        total_var.set(f"total: {sum(1 for r in rows if (r.get('status') or 'ok') in ('ok', 'no audio'))} stories, "
                       f"{sum(1 for r in rows if r.get('status') == 'error')} failed attempts / "
                       f"${total:.6f} (writer + narration)  ({log_path})")
 
@@ -2299,6 +2369,7 @@ def run_gui(defaults: dict | None = None) -> None:
             start_batch([source], retry=True)
 
     def on_row_double_click(_event: object = None) -> None:
+        hide_cell_tip()
         row = selected_row()
         if row is None:
             return
@@ -2311,6 +2382,7 @@ def run_gui(defaults: dict | None = None) -> None:
     row_menu = tk.Menu(root, tearoff=0)
 
     def show_row_menu(event: object) -> None:
+        hide_cell_tip()
         item = tree.identify_row(event.y)  # type: ignore[attr-defined]
         if not item:
             return
@@ -2324,13 +2396,104 @@ def run_gui(defaults: dict | None = None) -> None:
             row_menu.add_command(label="Retry this storyboard",
                                  command=lambda: start_batch([Path(row["source_image"])],
                                                              retry=True))
+        elif row.get("status") == "deleted":
+            row_menu.add_command(label="(production deleted)", state=tk.DISABLED)
         else:
+            folder = current_out_dir() / row.get("folder", "")
             row_menu.add_command(label="Open in Player", command=lambda: open_row_in_player(row))
-            row_menu.add_command(label="Open folder", command=lambda: ig_open(
-                str(current_out_dir() / row.get("folder", ""))))
-        row_menu.post(event.x_root, event.y_root)  # type: ignore[attr-defined]
+            row_menu.add_command(label="Open folder", command=lambda: ig_open(str(folder)))
+            row_menu.add_separator()
+            if row.get("status") != "no audio":
+                row_menu.add_command(label="Delete audio only…",
+                                     command=lambda: on_delete(folder, audio_only=True))
+            row_menu.add_command(label="Delete script + audio…",
+                                 command=lambda: on_delete(folder, audio_only=False))
+        # tk_popup (not post): the menu grabs the pointer, so a click outside it
+        # or Esc closes it. No grab_release() here: on X11 tk_popup returns at
+        # once and releasing the grab would leave the menu stuck on screen.
+        row_menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
+
+    def on_delete(folder: Path, audio_only: bool) -> None:
+        if state["running"]:
+            messagebox.showinfo("Delete", "Wait for the current generation to finish.")
+            return
+        meta = load_story_meta(folder) or {}
+        title = meta.get("title", folder.name)
+        what = ("only the AUDIO (audio.wav) of" if audio_only else
+                "the whole production (script, audio, story.json and the storyboard copy) of")
+        if not messagebox.askyesno(
+                "Delete", f"Delete {what}\n\n\u201c{title}\u201d\n{folder}\n\n"
+                          "The original storyboard in the storyboards dir is NOT touched. "
+                          "Files go to the Trash when possible."
+                          + ("" if audio_only else "\n\nThis storyboard will be written "
+                             "again the next time you generate this folder.") + "\n\nDelete?",
+                icon=messagebox.WARNING, default=messagebox.NO):
+            return
+        if state["folder"] is not None and Path(state["folder"]).resolve() == folder.resolve():
+            stop_play(release=True)
+            state.update(story=None, folder=None, image_src=None)
+            render_image()
+            fill_script({})
+        try:
+            method = delete_story(folder, audio_only=audio_only)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Delete", str(exc))
+            return
+        status_var.set(f"{'moved to the Trash' if method == 'trash' else 'deleted'}: "
+                       f"{'audio of ' if audio_only else ''}{title}")
+        refresh_log()
+        refresh_stories(select=folder if audio_only else None)
 
     tree.bind("<Button-3>", show_row_menu)
+
+    cell_tip: dict = {"window": None, "key": None, "after": None}
+
+    def hide_cell_tip(_event: object = None) -> None:
+        if cell_tip["after"] is not None:
+            root.after_cancel(cell_tip["after"])
+            cell_tip["after"] = None
+        if cell_tip["window"] is not None:
+            try:
+                cell_tip["window"].destroy()
+            except tk.TclError:
+                pass
+            cell_tip["window"] = None
+        cell_tip["key"] = None
+
+    def show_cell_tip(text: str, x: int, y: int) -> None:
+        cell_tip["after"] = None
+        window = tk.Toplevel(root)
+        window.wm_overrideredirect(True)
+        window.wm_attributes("-topmost", True)
+        ttk.Label(window, text=text, wraplength=520, justify=tk.LEFT, background="#ffffe0",
+                  relief=tk.SOLID, borderwidth=1, padding=4).pack()
+        window.wm_geometry(f"+{x + 14}+{y + 18}")
+        cell_tip["window"] = window
+
+    def on_tree_motion(event: object) -> None:
+        """Tooltip with the full text of a cell that is wider than its column."""
+        item = tree.identify_row(event.y)  # type: ignore[attr-defined]
+        column = tree.identify_column(event.x)  # type: ignore[attr-defined]
+        key = (item, column)
+        if key == cell_tip["key"]:
+            return
+        hide_cell_tip()
+        cell_tip["key"] = key
+        if not item or not column.startswith("#"):
+            return
+        index = int(column[1:]) - 1
+        values = tree.item(item, "values")
+        if not 0 <= index < len(values):
+            return
+        text = str(values[index])
+        if body_font.measure(text) + 14 <= tree.column(columns[index], "width"):
+            return  # fits: nothing hidden
+        x, y = event.x_root, event.y_root  # type: ignore[attr-defined]
+        cell_tip["after"] = root.after(450, lambda: show_cell_tip(text, x, y))
+
+    tree.bind("<Motion>", on_tree_motion)
+    tree.bind("<Leave>", hide_cell_tip)
+    tree.bind("<ButtonPress>", hide_cell_tip, add="+")
 
     # ---- Model tab ----
     ttk.Label(tab_model, text="Writer model:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
@@ -2551,7 +2714,9 @@ def run_gui(defaults: dict | None = None) -> None:
                                on_end=lambda: root.after(0, on_play_end))
         except (OSError, wave.Error, EOFError) as exc:
             state["player"] = None
-            status_var.set(f"audio error: {exc}")
+            time_var.set("no audio" if meta.get("audio_deleted") else "audio error")
+            status_var.set("this story has no audio (deleted)" if meta.get("audio_deleted")
+                           else f"audio error: {exc}")
             return
         state["player"] = player
         seek_scale.configure(to=max(0.1, player.duration))
@@ -2903,6 +3068,7 @@ def run_gui(defaults: dict | None = None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cli_work = bool(args.input_dir or args.image or args.retry_failed or args.list or args.play
+                    or args.delete
                     or args.check_voices
                     or args.forget_key or args.remember_key)
     if args.gui or not cli_work:
