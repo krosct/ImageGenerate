@@ -3010,7 +3010,10 @@ def run_gui(defaults: dict | None = None) -> None:
         item = tree.identify_row(event.y)  # type: ignore[attr-defined]
         if item:
             tree.selection_set(item)
-            list_menu.post(event.x_root, event.y_root)  # type: ignore[attr-defined]
+            # tk_popup (not post): grabs the pointer so a click outside or Esc
+            # closes the menu. No grab_release(): on X11 tk_popup returns at once
+            # and releasing the grab would leave the menu stuck on screen.
+            list_menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
 
     tree.bind("<Button-3>", show_list_menu)
     tree.bind("<Button-2>", show_list_menu)  # right-click on macOS
