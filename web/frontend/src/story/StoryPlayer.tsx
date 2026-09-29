@@ -33,7 +33,7 @@ export default function StoryPlayer(p: Props) {
   const [duration, setDuration] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [seeking, setSeeking] = useState<number | null>(null)
-  const [widths, setWidths] = useState<[number, number]>([280, 380])
+  const [widths, setWidths] = useState<[number, number]>([200, 300])
   const [view, setView] = useState({ zoom: 1, x: 0, y: 0 })
   const audio = useRef<HTMLAudioElement>(null)
   const stage = useRef<HTMLDivElement>(null)
@@ -195,16 +195,39 @@ export default function StoryPlayer(p: Props) {
           <button className="ghost" disabled={!story} onClick={() => story && void api.open(story.folder)}>Open folder</button>
         </div>
         <div className="splitter" onMouseDown={(e) => startResize(0, e)} title="Drag to resize" />
-        <div className="player-stage" ref={stage} onWheel={onWheel} onMouseDown={onMouseDown}
-          onContextMenu={(e) => { e.preventDefault(); setView({ zoom: 1, x: 0, y: 0 }) }}>
-          {story?.image
-            ? <img src={api.fileUrl(story.image)} alt={story.title} draggable={false}
-                style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }} />
-            : <div className="hint">{story ? 'storyboard image not found' : ''}</div>}
-          {story?.image && (
-            <div className="stage-hint">wheel: zoom at the pointer · drag: move · right-click: reset
-              {view.zoom !== 1 ? ` · ${Math.round(view.zoom * 100)}%` : ''}</div>
-          )}
+        <div className="player-main">
+            <div className="player-stage" ref={stage} onWheel={onWheel} onMouseDown={onMouseDown}
+              onContextMenu={(e) => { e.preventDefault(); setView({ zoom: 1, x: 0, y: 0 }) }}>
+              {story?.image
+                ? <img src={api.fileUrl(story.image)} alt={story.title} draggable={false}
+                    style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }} />
+                : <div className="hint">{story ? 'storyboard image not found' : ''}</div>}
+              {story?.image && (
+                <div className="stage-hint">wheel: zoom at the pointer · drag: move · right-click: reset
+                  {view.zoom !== 1 ? ` · ${Math.round(view.zoom * 100)}%` : ''}</div>
+              )}
+            </div>
+
+            <div className="player-controls">
+              <button className="ghost" title="Previous scene" onClick={() => jumpScene(-1)}>⏮</button>
+              <button className="ghost" title="Back 10 seconds (Left arrow: 5 s)" onClick={() => skip(-10)}>⏪ 10s</button>
+              <button className="ghost" title="Play / Pause (Space)" onClick={toggle} disabled={!story?.audio}>{playing ? '⏸' : '▶'}</button>
+              <button className="ghost" title="Forward 10 seconds (Right arrow: 5 s)" onClick={() => skip(10)}>10s ⏩</button>
+              <button className="ghost" title="Next scene" onClick={() => jumpScene(1)}>⏭</button>
+              <button className="ghost" title="Stop (back to the start)" onClick={stop}>⏹</button>
+              <input type="range" className="seek" min={0} max={Math.max(0.1, duration)} step={0.1}
+                value={shownPos} disabled={!story?.audio}
+                onChange={(e) => setSeeking(Number(e.target.value))}
+                onMouseUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }}
+                onKeyUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }} />
+              <span className="time">
+                {story && !story.audio ? (story.audio_deleted ? 'no audio' : 'audio error') : `${clock(shownPos)} / ${clock(duration)}`}
+              </span>
+            </div>
+            <div className="hint scene-line">
+              {scene ? `${story?.scene_word} ${scene.number}/${scenes.length}${scene.heading ? ` — ${scene.heading}` : ''}` : ''}
+              {story && !story.audio && story.audio_deleted ? 'this story has no audio (deleted)' : ''}
+            </div>
         </div>
         <div className="splitter" onMouseDown={(e) => startResize(1, e)} title="Drag to resize" />
         <div className="player-script" ref={scriptBox}>
@@ -230,26 +253,6 @@ export default function StoryPlayer(p: Props) {
         </div>
       </div>
 
-      <div className="player-controls">
-        <button className="ghost" title="Previous scene" onClick={() => jumpScene(-1)}>⏮</button>
-        <button className="ghost" title="Back 10 seconds (Left arrow: 5 s)" onClick={() => skip(-10)}>⏪ 10s</button>
-        <button className="ghost" title="Play / Pause (Space)" onClick={toggle} disabled={!story?.audio}>{playing ? '⏸' : '▶'}</button>
-        <button className="ghost" title="Forward 10 seconds (Right arrow: 5 s)" onClick={() => skip(10)}>10s ⏩</button>
-        <button className="ghost" title="Next scene" onClick={() => jumpScene(1)}>⏭</button>
-        <button className="ghost" title="Stop (back to the start)" onClick={stop}>⏹</button>
-        <input type="range" className="seek" min={0} max={Math.max(0.1, duration)} step={0.1}
-          value={shownPos} disabled={!story?.audio}
-          onChange={(e) => setSeeking(Number(e.target.value))}
-          onMouseUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }}
-          onKeyUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }} />
-        <span className="time">
-          {story && !story.audio ? (story.audio_deleted ? 'no audio' : 'audio error') : `${clock(shownPos)} / ${clock(duration)}`}
-        </span>
-      </div>
-      <div className="hint scene-line">
-        {scene ? `${story?.scene_word} ${scene.number}/${scenes.length}${scene.heading ? ` — ${scene.heading}` : ''}` : ''}
-        {story && !story.audio && story.audio_deleted ? 'this story has no audio (deleted)' : ''}
-      </div>
       {story?.audio && (
         <audio ref={audio} src={api.fileUrl(story.audio)} preload="metadata"
           onTimeUpdate={(e) => setPos(e.currentTarget.currentTime)}

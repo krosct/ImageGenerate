@@ -806,7 +806,9 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
 @media (max-width: 720px) { .voice-row { grid-template-columns: 1fr; } }
 
 .player .field-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.player-panes { display: grid; height: 62vh; min-height: 360px; }
+.player-panes { display: grid; height: calc(100vh - 200px); min-height: 380px; }
+/* center column: storyboard stage + its transport controls, kept together */
+.player-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; justify-content: center; }
 .player-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .player-list-box {
   flex: 1;
@@ -838,15 +840,19 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
   overflow: hidden;
   background: #111;
   border-radius: var(--radius-control);
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
   cursor: grab;
   user-select: none;
 }
 .player-stage:active { cursor: grabbing; }
 .player-stage img {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(100vh - 340px);
   object-fit: contain;
   transform-origin: center center;
   pointer-events: none;
@@ -876,13 +882,14 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
 .player-script .scene-current { background: rgba(255, 243, 176, 0.14); }
 .player-script .scene-heading { font-weight: 700; margin-bottom: 2px; }
 .player-script .voice-line { color: var(--text-secondary); margin-top: 12px; }
-.player-controls { display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+.player-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .player-controls .seek { flex: 1; min-width: 160px; accent-color: var(--accent-blue); }
 .player-controls .time { font-family: var(--font-mono); font-size: 12px; min-width: 96px; text-align: right; }
-.scene-line { margin-top: 6px; }
+.scene-line { margin-top: 0; text-align: center; }
 @media (max-width: 860px) {
   .player-panes { grid-template-columns: 1fr !important; height: auto; }
   .splitter { display: none; }
   .player-list-box { max-height: 180px; }
-  .player-stage { height: 50vh; }
+  .player-main { justify-content: flex-start; }
+  .player-stage img { max-height: 50vh; }
 }
