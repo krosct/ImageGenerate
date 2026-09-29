@@ -150,6 +150,12 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
   <a href="#web-generate" class="sub">Aba Generate</a>
   <a href="#web-model" class="sub">Aba Model</a>
   <a href="#web-dir" class="sub">Aba Dir + folder picker</a>
+  <a href="#story">StoryGenerate</a>
+  <a href="#story-abas" class="sub">Abas</a>
+  <a href="#story-roteirista" class="sub">Roteirista</a>
+  <a href="#story-narracao" class="sub">Narração e custo</a>
+  <a href="#story-log" class="sub">Log, falhas e retry</a>
+  <a href="#story-cli" class="sub">CLI</a>
   <h4>Como funciona</h4>
   <a href="#pipeline">Pipeline de geração</a>
   <a href="#provedores">Provedores e modelos</a>
@@ -167,7 +173,7 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 
 <main class="content" id="top">
 <h1>ImageGenerate</h1>
-<p class="lead">Gere imagens por IA sem sair do lugar: <strong>prompt + contexto + referências → imagem + log</strong>. Três interfaces, um mesmo núcleo: <strong>CLI</strong> no terminal, <strong>GUI</strong> desktop (Tkinter) e <strong>Web</strong> no navegador (React + FastAPI).</p>
+<p class="lead">Gere imagens por IA sem sair do lugar: <strong>prompt + contexto + referências → imagem + log</strong>. Três interfaces, um mesmo núcleo: <strong>CLI</strong> no terminal, <strong>GUI</strong> desktop (Tkinter) e <strong>Web</strong> no navegador (React + FastAPI). Junto vem o <strong><a href="#story">StoryGenerate</a></strong>: transforma storyboards em <strong>roteiro + narração em áudio</strong>, com um player para ouvir lendo o roteiro.</p>
 
 <div class="callout tip"><span class="tag">Por que três interfaces?</span>O núcleo de geração (<code class="inline">run_generation()</code> em <code class="inline">image_generate.py</code>) é compartilhado. Cada interface é só uma “casca” diferente sobre o mesmo pipeline — então tudo que a GUI faz, o CLI também faz (paridade garantida).</div>
 
@@ -177,8 +183,10 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (só stdlib + <code class="inline">cryptography</code>)</td><td>Zero dependência pesada: sem Pillow (PNG/JPEG/WebP lidos à mão), sem requests (usa <code class="inline">http.client</code> para permitir cancelamento real)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI, só <code class="inline">127.0.0.1</code></td><td>Expõe o mesmo núcleo via HTTP para o frontend React; roda local, nada sai da máquina além das chamadas à API do provedor</td></tr>
 <tr><td><code class="inline">web/frontend/</code></td><td>React + TypeScript + Vite</td><td>Interface moderna (tema Superdesign): composer de prompt, histórico, modal de resultado com som</td></tr>
+<tr><td><code class="inline">story_generate.py</code></td><td>StoryGenerate: storyboard → roteiro (roteirista com visão) + narração (Fish Audio via OpenRouter) + player; CLI + GUI (só stdlib; reaproveita HTTP, cancelamento e cofre do <code class="inline">image_generate.py</code>)</td><td>Segundo app sobre o mesmo núcleo: uma chave OpenRouter só, mesmas regras de cancelamento e log</td></tr>
+<tr><td><code class="inline">tests/</code></td><td>Testes offline (<code class="inline">python3 -m unittest discover -s tests</code>)</td><td>Tudo testado sem rede e sem gastar: provedores, cofre, Dynamic, Analyse, StoryGenerate, web</td></tr>
 <tr><td><code class="inline">img/logo.png</code></td><td>Marca</td><td>Favicon + logo no topbar web, ícone da janela GUI e do launcher Linux</td></tr>
-<tr><td><code class="inline">install.sh</code></td><td>Instalador do launcher Linux</td><td>Gera o <code class="inline">.desktop</code> com os caminhos reais da máquina (arquivo com caminhos pessoais não vai ao git)</td></tr>
+<tr><td><code class="inline">install.sh</code></td><td>Instalador dos launchers Linux (ImageGenerate e, opcionalmente, StoryGenerate)</td><td>Gera o <code class="inline">.desktop</code> com os caminhos reais da máquina (arquivo com caminhos pessoais não vai ao git)</td></tr>
 </table>
 
 <h2 id="instalacao">Instalação</h2>
@@ -192,8 +200,10 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
 cd web/frontend &amp;&amp; npm install &amp;&amp; npm run build &amp;&amp; cd ../..</code></pre>
 <div class="callout"><span class="tag">Por quê compilar?</span>O <code class="inline">server.py</code> serve o <code class="inline">web/frontend/dist/</code> (build), não o <code class="inline">src/</code>. Editou o frontend? Rode <code class="inline">npm run build</code> de novo e recarregue — sem reiniciar o servidor. Para hot reload, use <code class="inline">npm run dev</code> (porta 5173, com proxy de <code class="inline">/api</code> para a 8000).</div>
 <h3>Launcher Linux (ícone no dock)</h3>
-<pre><button class="copy-btn">Copiar</button><code>bash install.sh
-# depois: tecla Super → ImageGenerate → Enter (abra pelo launcher, não pelo terminal)</code></pre>
+<pre><button class="copy-btn">Copiar</button><code>bash install.sh                # pergunta se instala também o StoryGenerate [s/N]
+bash install.sh --with-story   # instala os dois sem perguntar (--no-story: só o ImageGenerate)
+# depois: tecla Super → ImageGenerate / StoryGenerate → Enter (abra pelo launcher, não pelo terminal)</code></pre>
+<div class="callout warn"><span class="tag">Sem sudo</span>O instalador é por usuário (<code class="inline">~/.local</code>) e recusa rodar como root: com <code class="inline">sudo</code> o <code class="inline">HOME</code> vira <code class="inline">/root</code> e o atalho iria para o menu do root. Ele só escreve lançadores e ícones — nunca mexe em <code class="inline">~/.config/image_generate/</code> (configurações e chaves). Pode rodar de novo quantas vezes quiser.</div>
 
 <h2 id="inicio-rapido">Início rápido</h2>
 <pre><button class="copy-btn">Copiar</button><code># Grátis, sem chave: gera um placeholder local
@@ -240,17 +250,20 @@ python3 image_generate.py --prompt "uma arara voando" --prop 16:9 --resolution 1
 python3 image_generate.py --prompt-file ideia.md --prompt "variação:" --context-dir ./docs --memory-dir ./refs
 python3 image_generate.py --prompt "ok" --dry-run --api-key "sk-or-..." --remember-key  # guarda no cofre + teste grátis
 python3 image_generate.py --provider openrouter --forget-key   # apaga a chave guardada
-python3 image_generate.py --list-log                           # mostra o histórico CSV</code></pre>
+python3 image_generate.py --list-log                           # mostra o histórico CSV
+python3 image_generate.py --analyse ./A --analyse ./B          # compara pastas (aba Analyse no terminal)
+python3 image_generate.py --analyse ./A --analyse ./B --choose 1:2 --choose 3:1   # copia as escolhidas + relatório</code></pre>
 <div class="callout tip"><span class="tag">Guardar chave</span><code class="inline">--remember-key</code> precisa de <code class="inline">--api-key</code> (ou da variável de ambiente) junto: ele criptografa e salva antes de gerar. O exemplo acima combina com <code class="inline">--dry-run</code> para validar tudo sem gastar.</div>
 <p><kbd>Ctrl</kbd>+<kbd>C</kbd> cancela: aborta as conexões, apaga arquivos parciais, não registra nada no log.</p>
 
 <h2 id="gui">GUI (desktop)</h2>
-<p>Janela Tkinter em <strong>3 abas fixas</strong> (Generate, Model, Dir) mais a aba <strong>Injection</strong>, que só aparece quando é útil. Abra com <code class="inline">python3 image_generate.py --gui</code>.</p>
+<p>Janela Tkinter em <strong>4 abas fixas</strong> (Generate, Model, Dir, Analyse) mais a aba <strong>Injection</strong>, que só aparece quando é útil. Abra com <code class="inline">python3 image_generate.py --gui</code>. O botão <strong>?</strong> no canto do cabeçalho abre esta documentação.</p>
 <table>
 <tr><th>Aba</th><th>Função</th><th>Por quê separada?</th></tr>
 <tr><td>Generate</td><td>Prompt, proporção, resolução, formato, seed, dry-run, botão Generate/Cancel, cronômetro e lista do log</td><td>É o uso diário — fica tudo à mão numa tela só</td></tr>
 <tr><td>Model</td><td>Provedor, modelo de imagem, modelo de resumo, chave + “remember me”/Forget</td><td>Configura-se uma vez e raramente se mexe</td></tr>
 <tr><td>Dir</td><td>Pastas de saída, contexto e memória (+ Browse, que abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe existente mais próxima) + checkbox <strong>Dynamic</strong> por pasta</td><td>Caminhos mudam por projeto, não por geração</td></tr>
+<tr><td>Analyse</td><td>Compara pastas lado a lado (1 coluna por pasta; linha N = a N-ésima imagem mais recente de cada uma, ou a mais antiga com o botão ⇅). Clique seleciona (1 por linha), duplo clique abre. <strong>Choose</strong> copia as escolhidas para <code class="inline">&lt;Chosen dir&gt;/&lt;data_hora&gt;/</code> com <code class="inline">report.md</code> + <code class="inline">report.csv</code> (origem, tamanho, data, prompt/modelo/seed do log e contra quais imagens cada uma foi escolhida)</td><td>Escolher as melhores gerações entre modelos/tentativas sem mexer nos originais</td></tr>
 <tr><td>Injection <em>(condicional)</em></td><td>Tabela de valores por geração para variáveis <code class="inline">{{nome}}</code> do prompt</td><td>Só existe quando quantidade &gt; 1 e o prompt tem variáveis</td></tr>
 </table>
 <ul>
@@ -258,12 +271,26 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Dicas flutuantes:</strong> passe o mouse sobre os campos — cada um explica o que faz.</li>
 <li><strong>Preview de proporção:</strong> o ⓘ ao lado de “Aspect” desenha o retângulo da proporção escolhida.</li>
 <li><strong>Ícone no dock:</strong> a janela usa <code class="inline">img/logo.png</code> como ícone e <code class="inline">WM_CLASS=ImageGenerate</code>; no Ubuntu, abra pelo launcher instalado via <code class="inline">install.sh</code> para agrupar corretamente (sem a engrenagem “tk”).</li>
-<li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 abre confirmação avisando que cada imagem pode somar custo.</li>
+<li><strong>Quantidade (×N ao lado do Generate):</strong> naturais 1–30; acima de 1 abre confirmação avisando que cada imagem pode somar custo. Acima de 10, o pedido é dividido em chamadas de no máximo 10 imagens (limite do OpenRouter/OpenAI por chamada) — você recebe todas.</li>
+<li><strong>Lista do log (Summary):</strong> da requisição mais nova para a mais velha, atualizada a cada imagem de um lote. <strong>Botão direito → Use prompt</strong> recarrega o prompt daquela linha; o menu fecha ao clicar fora ou com <kbd>Esc</kbd>.</li>
 </ul>
 
+<h3 id="gui-analyse">Aba Analyse (comparar e escolher)</h3>
+<p>Para escolher as melhores imagens entre várias pastas (modelos, tentativas, prompts diferentes) sem mexer nos originais:</p>
+<ol>
+<li><strong>Add folder…</strong> — adicione pelo menos 1 pasta (sem limite); cada pasta vira uma <strong>coluna</strong> (✕ remove). As pastas ficam salvas no config.</li>
+<li><strong>Linha N</strong> = a N-ésima imagem <strong>mais recente</strong> de cada pasta (data de modificação do arquivo); pasta com menos imagens mostra “—”. <strong>Order ⇅</strong> inverte e alinha pela mais antiga (seleções mantidas; se duas caírem na mesma linha, uma é descartada com aviso).</li>
+<li><strong>Clique</strong> seleciona (verde) — <strong>uma por linha</strong>: clicar em outra da mesma linha troca; clicar de novo desmarca. Duplo clique abre a imagem; o mouse parado mostra nome, pasta, data e tamanho.</li>
+<li><strong>Zoom − / Zoom +</strong> (canto direito): miniaturas de 100 a 480 px (100, 150, 220, 320, 480), mantendo as seleções. Rolagem com a roda do mouse (<kbd>Shift</kbd> + roda = horizontal).</li>
+<li>O rodapé mostra linhas, selecionadas, linhas sem escolha e, por pasta, imagens e selecionadas.</li>
+<li><strong>Choose</strong> copia as escolhidas para <code class="inline">&lt;Chosen dir&gt;/&lt;data_hora&gt;/</code> (vazio = <code class="inline">&lt;Output dir&gt;/chosen</code>), como <code class="inline">&lt;linha&gt;_&lt;pasta&gt;_&lt;arquivo&gt;</code>, com <code class="inline">report.md</code> e <code class="inline">report.csv</code>.</li>
+</ol>
+<p>O relatório traz as pastas comparadas (imagens, escolhidas, % das escolhas), a tabela das escolhidas e, por imagem: origem, <strong>contra quais imagens foi escolhida</strong>, prompt completo, provedor/modelo, seed, proporção, resolução, custo e data — lidos do <code class="inline">log_image_generate.csv</code> da pasta ou de até 2 pastas acima (imagens movidas para subpastas continuam encontradas). Miniaturas via ImageMagick/ffmpeg, com cache em <code class="inline">~/.cache/image_generate/thumbs</code>.</p>
+<div class="callout tip"><span class="tag">CLI equivalente</span><code class="inline">--analyse A --analyse B</code> imprime a tabela; <code class="inline">--choose LINHA:COLUNA</code> (repetível, 1 por linha) copia; <code class="inline">--oldest-first</code> e <code class="inline">--chosen-dir</code> também existem. <code class="inline">--gui --analyse A --analyse B</code> abre a aba já com as pastas.</div>
+
 <h3 id="gui-dynamic">Dynamic (uma subpasta por geração)</h3>
-<p>Abaixo de cada pasta (Output, Context, Memory) há o checkbox <strong>Dynamic</strong>, habilitado só quando n &gt; 1 (padrão: desmarcado). Marcado, aparecem as caixas <strong>Start</strong> (primeira subpasta, natural ≥ 1, padrão 1) e <strong>Range</strong> (última subpasta, natural &gt; Start, obrigatória). As gerações usam, em ordem, <code class="inline">&lt;pasta&gt;/&lt;Start&gt;</code> … <code class="inline">&lt;pasta&gt;/&lt;Range&gt;</code> e voltam ao Start: com n=10, Context Start 1/Range 10 e Output Start 1/Range 5, a geração 6 lê <code class="inline">ctx/6</code> e salva em <code class="inline">out/1</code>. O Start serve para <strong>retomar um lote</strong> sem refazer as primeiras pastas (ex.: Memory Start 2, Range 12, n=11 → pastas 2…12). Pastas sem Dynamic ficam fixas. Subpastas de contexto/memória precisam existir (validado antes de gerar, nada é gasto); as de saída são criadas, cada uma com seu próprio CSV. Com seed definida, a geração i usa seed + i − 1.</p>
-<div class="callout tip"><span class="tag">CLI equivalente</span><code class="inline">--count 11 --dynamic-memory 12 --dynamic-memory-start 2</code> (também <code class="inline">--dynamic-output[-start]</code> e <code class="inline">--dynamic-context[-start]</code>). Na <strong>web</strong>, os mesmos campos ficam na aba Dir.</div>
+<p>Abaixo de cada pasta (Output, Context, Memory) há o checkbox <strong>Dynamic</strong>, habilitado só quando n &gt; 1 (padrão: desmarcado). Marcado, aparecem as caixas <strong>Start</strong> (primeira subpasta, natural ≥ 1, padrão 1), <strong>Range</strong> (última subpasta, natural &gt; Start, obrigatória) e <strong>Batch</strong> (quantas gerações seguidas ficam em cada subpasta, natural ≥ 1, padrão 1). As gerações usam, em ordem, <code class="inline">&lt;pasta&gt;/&lt;Start&gt;</code> … <code class="inline">&lt;pasta&gt;/&lt;Range&gt;</code> e voltam ao Start: com n=10, Context Start 1/Range 10 e Output Start 1/Range 5, a geração 6 lê <code class="inline">ctx/6</code> e salva em <code class="inline">out/1</code>. Com Batch &gt; 1 as gerações ficam agrupadas: Start 2, Range 12, Batch 3 → gerações 1–3 na pasta 2, 4–6 na 3, 7–9 na 4…; passando do Range, volta ao Start. O Start serve para <strong>retomar um lote</strong> sem refazer as primeiras pastas (ex.: Memory Start 2, Range 12, n=11 → pastas 2…12). Pastas sem Dynamic ficam fixas. Subpastas de contexto/memória precisam existir (validado antes de gerar, nada é gasto); as de saída são criadas, cada uma com seu próprio CSV. Com seed definida, a geração i usa seed + i − 1.</p>
+<div class="callout tip"><span class="tag">CLI equivalente</span><code class="inline">--count 11 --dynamic-memory 12 --dynamic-memory-start 2</code> (também <code class="inline">--dynamic-output[-start|-batch]</code>, <code class="inline">--dynamic-context[-start|-batch]</code> e <code class="inline">--dynamic-memory-batch</code>). Na <strong>web</strong>, os mesmos campos ficam na aba Dir.</div>
 
 <h3 id="gui-injection">Aba Injection (variáveis no prompt)</h3>
 <p>Quando a quantidade é <strong>&gt; 1</strong> e o prompt contém variáveis <code class="inline">{{qualquer texto}}</code>, aparece a aba <strong style="color:#e6c600">Injection</strong> (título em amarelo). Nela há uma tabela com <strong>uma linha por geração</strong> e <strong>uma coluna por variável</strong> — preencha o valor de cada variável em cada geração:</p>
@@ -291,7 +318,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Status ao vivo:</strong> cronômetro + estado via SSE (<code class="inline">idle, generating, done, cancelled, error</code>) e botão 🔔/🔕 do som.</li>
 <li><strong>Histórico:</strong> tabela do CSV com totais; <strong>clicar numa linha recarrega o prompt</strong> dela (branch de variação sem sobrescrever nada).</li>
 <li><strong>Modal de sucesso:</strong> ao receber a imagem, abre um aviso moderno com selo ✓, <strong>som de alerta</strong> (chime sintetizado via Web Audio, sem arquivo), preview, <strong>caminho completo</strong> com botão <em>Copy path</em> e <em>Open full size</em>. Erro toca um tom grave; cancelamento não toca nada.</li>
-<li><strong>Quantidade (×N ao lado do Generate):</strong> só naturais 1–10; acima de 1 pede confirmação no navegador destacando o custo adicional.</li>
+<li><strong>Quantidade (×N ao lado do Generate):</strong> naturais 1–30; acima de 1 pede confirmação no navegador destacando o custo adicional.</li>
 </ul>
 <div class="callout"><span class="tag">Por que o som às vezes não toca?</span>Navegadores bloqueiam áudio sem gesto do usuário. O contexto de áudio é criado no clique do Generate — se a aba estiver mutada ou o autoplay bloqueado, o modal aparece normalmente, só sem som.</div>
 
@@ -299,8 +326,73 @@ python3 image_generate.py --list-log                           # mostra o histó
 <p>Provedor, modelo de imagem, modelo de resumo e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
 
 <h3 id="web-dir">Aba Dir + folder picker</h3>
-<p>Cada pasta tem input (digitar/colar) + botão <strong>Browse…</strong>, que abre um modal navegando nas <strong>pastas reais da máquina</strong> (o servidor é local): caminho atual, ⬆ Up, ⌂ Home, lista de subpastas, criar nova pasta e <em>Use this folder</em>.</p>
+<p>Cada pasta tem input (digitar/colar) + botão <strong>Browse…</strong>, que abre um modal navegando nas <strong>pastas reais da máquina</strong> (o servidor é local): caminho atual, ⬆ Up, ⌂ Home, lista de subpastas, criar nova pasta e <em>Use this folder</em>. O modal abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe existente mais próxima. Abaixo de cada pasta há o mesmo <strong>Dynamic</strong> da GUI (Start, Range, Batch; habilitado só com quantidade &gt; 1).</p>
 <div class="callout warn"><span class="tag">Limite do navegador</span>O seletor nativo de pastas do browser não entrega o caminho real ao servidor por segurança — por isso o picker navega no servidor via <code class="inline">/api/browse</code> em vez de <code class="inline">&lt;input type=file&gt;</code>.</div>
+
+<h2 id="story">StoryGenerate (storyboard → história narrada)</h2>
+<p><code class="inline">story_generate.py</code> transforma cada imagem de uma pasta de storyboards numa <strong>história escrita e narrada</strong>. Abra com <code class="inline">python3 story_generate.py --gui</code> (ou pelo launcher). O botão <strong>?</strong> do cabeçalho abre esta seção.</p>
+<ol>
+<li><strong>Roteirista</strong> (modelo de chat <em>com visão</em> no OpenRouter; padrão <code class="inline">google/gemini-3.7-flash</code>): lê os quadros da esquerda para a direita e de cima para baixo, escreve <strong>uma cena por quadro</strong> com transições, dá um título curto e <strong>escolhe a voz</strong> mais adequada entre até 5 vozes do Fish Audio.</li>
+<li><strong>Narração</strong> (Fish Audio <em>via OpenRouter</em>): lê cada cena com a voz escolhida; as cenas viram um único <code class="inline">audio.wav</code> com uma pausa curta entre elas — por isso o player sabe onde cada cena começa.</li>
+<li><strong>Saída</strong>: pasta <code class="inline">&lt;título&gt;/</code> com <code class="inline">storyboard.png</code> (cópia), <code class="inline">roteiro.md</code>, <code class="inline">audio.wav</code> e <code class="inline">story.json</code> (metadados + tempos das cenas), mais o <code class="inline">log_story_generate.csv</code> na pasta de saída.</li>
+</ol>
+<div class="callout tip"><span class="tag">Uma chave só</span>Roteirista e narração usam a <strong>mesma chave OpenRouter</strong> do ImageGenerate (cofre compartilhado). Não precisa de conta no Fish Audio: o voice id é o código na URL da voz (<code class="inline">fish.audio/m/&lt;id&gt;</code>).</div>
+
+<h3 id="story-abas">Abas</h3>
+<table>
+<tr><th>Aba</th><th>Função</th></tr>
+<tr><td>Generate</td><td>Pasta de storyboards, pasta de saída, idioma, <strong>Writer</strong> (estilo do roteirista), <strong>Duration</strong> (duração alvo), dry-run, <em>redo existing</em>; botões Generate stories / Cancel / <strong>Retry failed (n)</strong>; linha azul de status com o passo atual; lista do log (mais nova primeiro)</td></tr>
+<tr><td>Model</td><td>Writer model (aceita <a href="#story-roteirista">cadeia de fallback</a> com <code class="inline">;</code>), TTS model, chave OpenRouter + remember me / Forget</td></tr>
+<tr><td>Voices</td><td>Até 5 voice ids do Fish Audio + um rótulo opcional (ajuda o roteirista a escolher); <em>Check voices</em> mostra nome, idiomas e tags de cada voz (consulta pública, sem chave)</td></tr>
+<tr><td>Player</td><td>Lista das histórias, storyboard à esquerda e roteiro ao lado com a <strong>cena atual destacada</strong> (clique numa cena para pular até ela). Controles ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; atalhos <kbd>Espaço</kbd>, <kbd>←</kbd>/<kbd>→</kbd> (5 s), <kbd>↑</kbd>/<kbd>↓</kbd> (cena). Usa <code class="inline">aplay</code> (ou <code class="inline">pw-play</code>/<code class="inline">ffplay</code>)</td></tr>
+</table>
+<p>Configurações (pastas, modelos, idioma, estilo, duração, vozes) ficam em <code class="inline">story_config.json</code>, salvas ao gerar e ao fechar. Os storyboards originais nunca são alterados — só copiados.</p>
+
+<h3 id="story-roteirista">Roteirista: estilo, duração, fallback e nível de pensamento</h3>
+<ul>
+<li><strong>Estilo</strong> (dropdown <em>Writer</em>): <strong>Descritivo</strong> conta o que cada quadro mostra, fiel às imagens; <strong>Narrativo</strong> foca nas <strong>transições</strong> — cada cena começa explicando por que/como o personagem saiu do quadro anterior e chegou a este (ex.: a menina limpava o sapato e agora anda na rua — para onde vai?), sem contradizer nenhum quadro.</li>
+<li><strong>Duração alvo</strong> (<em>Duration</em>, vazio = automático; <code class="inline">90</code>, <code class="inline">1:30</code>, <code class="inline">2m</code>): convertida em palavras <strong>por voz</strong>, com a velocidade de fala medida nas suas histórias anteriores (vozes leem em ritmos bem diferentes). Espere cerca de ±15%.</li>
+<li><strong>Cadeia de fallback</strong>: no Writer model, separe modelos com <code class="inline">;</code> — ex. <code class="inline">qwen/qwen3.8-27b:free;google/gemini-3.7-flash</code>. Cada modelo tem direito às suas novas tentativas; se falhar (limite, erro, resposta inválida, filtro, rede), passa ao próximo. A lista mostra qual modelo escreveu cada história. Antes do lote, o app confere que <strong>todos</strong> os modelos aceitam imagem.</li>
+<li><strong>Limite de uso (HTTP 429)</strong>: espera 5, 15 e 30 s e tenta de novo (Cancel funciona durante a espera).</li>
+<li><strong>Nível de pensamento</strong>: se a resposta vier <strong>vazia</strong> ou <strong>estourar o tempo</strong> (3 min), a próxima tentativa pensa <strong>um nível a menos</strong>, dentro dos níveis que aquele modelo aceita (ex.: Qwen <code class="inline">xhigh → medium → low → none</code>; Gemini <code class="inline">medium → low</code>). No nível mínimo, passa ao próximo modelo da cadeia. O nível usado fica na coluna <code class="inline">writer_effort</code>.</li>
+</ul>
+
+<h3 id="story-narracao">Narração e custo</h3>
+<p>Modelos Fish Audio no OpenRouter: <code class="inline">fish-audio/s2.1-pro-free:free</code> (padrão, grátis, sem garantia de disponibilidade), <code class="inline">fish-audio/s2.1-pro</code>, <code class="inline">s2-pro</code> e <code class="inline">s1</code> (pagos por uso). O áudio chega em PCM (taxa e canais lidos do cabeçalho) e é salvo em WAV. Custo: modelos <code class="inline">:free</code> = 0 na hora; pagos são consultados no OpenRouter em segundo plano logo depois de cada história (as estatísticas levam ~10–15 s) e vão para <code class="inline">tts_cost_usd</code>.</p>
+
+<h3 id="story-log">Log, falhas, retry e exclusão</h3>
+<ul>
+<li><strong>Status</strong> (linha azul): <em>generating… 3/12 done (1 failed) | status: narrating scene 4/6 (Voz) (12 s)</em> — o contador de segundos mostra que o passo está vivo.</li>
+<li><strong>Já feito é pulado</strong>: um storyboard com história na pasta de saída (mesmo conteúdo de imagem) não é refeito — sem custo. Para refazer, marque <em>redo existing</em> (cria <code class="inline">Título (2)</code>, sem apagar a anterior).</li>
+<li><strong>Falhas</strong> ficam <strong>em vermelho</strong> com o motivo. <strong>Retry failed</strong> refaz só elas; duplo clique ou botão direito numa linha vermelha refaz aquela. O lote continua depois de uma falha; Cancel para tudo e não deixa arquivos pela metade.</li>
+<li><strong>Botão direito</strong> numa linha: <em>Copy row</em> (a linha inteira em texto organizado), <em>Open in Player</em>, <em>Open folder</em>, <em>Delete audio only…</em> e <em>Delete script + audio…</em> (com confirmação, para a Lixeira quando possível; o storyboard original nunca é tocado). O menu fecha ao clicar fora ou com <kbd>Esc</kbd>.</li>
+<li><strong>Texto que não cabe</strong> na coluna aparece inteiro num balão ao parar o mouse sobre a célula; as colunas se ajustam ao conteúdo e há rolagem horizontal.</li>
+</ul>
+
+<h3 id="story-cli">CLI</h3>
+<pre><button class="copy-btn">Copiar</button><code>python3 story_generate.py --input-dir ./storyboards --dry-run          # offline, sem custo
+python3 story_generate.py --input-dir ./storyboards \
+  --voice &lt;id1&gt;=narradora --voice &lt;id2&gt;=menino                    # até 5 vozes
+python3 story_generate.py --input-dir ./storyboards --style connective --duration 1:30 \
+  --writer-model "qwen/qwen3.8-27b:free;google/gemini-3.7-flash"
+python3 story_generate.py --retry-failed                               # só os que falharam
+python3 story_generate.py --check-voices --voice &lt;id&gt;                 # confere as vozes
+python3 story_generate.py --list                                       # histórias da pasta de saída
+python3 story_generate.py --play "~/Imagens/StoryGenerate/Um dia comum" # toca no terminal
+python3 story_generate.py --delete "~/Imagens/StoryGenerate/Um dia comum" --audio-only</code></pre>
+<table>
+<tr><th>Flag</th><th>Função</th></tr>
+<tr><td><code class="inline">--input-dir / --image</code></td><td>Pasta de storyboards / um storyboard (repetível)</td></tr>
+<tr><td><code class="inline">--output-dir</code></td><td>Onde as pastas das histórias + log vão (padrão <code class="inline">~/Imagens/StoryGenerate</code>)</td></tr>
+<tr><td><code class="inline">--writer-model / --tts-model</code></td><td>Roteirista (aceita <code class="inline">a;b;c</code>) / modelo Fish Audio no OpenRouter</td></tr>
+<tr><td><code class="inline">--style / --duration / --language</code></td><td><code class="inline">descriptive</code> ou <code class="inline">connective</code> / duração alvo / idioma (padrão pt-BR)</td></tr>
+<tr><td><code class="inline">--voice ID[=RÓTULO]</code></td><td>Voz do Fish Audio (repita até 5; padrão: as da aba Voices)</td></tr>
+<tr><td><code class="inline">--force / --retry-failed</code></td><td>Refazer os já feitos / só os que falharam</td></tr>
+<tr><td><code class="inline">--delete PASTA [--audio-only]</code></td><td>Apagar uma produção (ou só o áudio)</td></tr>
+<tr><td><code class="inline">--check-voices / --list / --play PASTA</code></td><td>Info das vozes / listar histórias / tocar no terminal</td></tr>
+<tr><td><code class="inline">--openrouter-key / --remember-key / --forget-key</code></td><td>Chave desta vez / guardar / apagar (mesmo cofre do ImageGenerate)</td></tr>
+<tr><td><code class="inline">--dry-run / --timeout / --gui</code></td><td>Sem custo (história e áudio de teste) / timeout / abrir a GUI</td></tr>
+</table>
 
 <h2 id="pipeline">Pipeline de geração</h2>
 <p><code class="inline">run_generation()</code> — o coração, usado pelas 3 interfaces:</p>
@@ -310,6 +402,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li>Dispara <strong>em paralelo</strong>: a requisição da imagem e o resumo do prompt (o resumo não atrasa a geração).</li>
 <li>Salva as imagens (<code class="inline">image_AAAAMMDD_HHMMSS.ext</code>), mede dimensões sem Pillow e <strong>acrescenta linhas no CSV</strong> com custo.</li>
 </ol>
+<p>Lotes com variáveis (Injection) ou com Dynamic rodam <strong>uma chamada por geração</strong> (<code class="inline">run_generation_batch</code>), cada uma com suas pastas; com seed, a geração i usa seed + i − 1. Sem isso, n imagens vão numa chamada só — dividida em blocos de até 10 quando n &gt; 10.</p>
 
 <h2 id="provedores">Provedores e modelos</h2>
 <p>Registro em <code class="inline">PROVIDERS</code> + uma função <code class="inline">request_*</code> por provedor, todas com o mesmo contrato <code class="inline">(payload, start_ts, elapsed)</code>.</p>
@@ -327,6 +420,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <li><strong>Cofre:</strong> <code class="inline">~/.config/image_generate/</code> — uma chave Fernet (<code class="inline">&lt;provedor&gt;.fkey</code>, 0600) + um blob cifrado por provedor (<code class="inline">&lt;provedor&gt;_api_key.enc</code>). Precisa de <code class="inline">pip install cryptography</code>.</li>
 <li><strong>Por quê Fernet por provedor?</strong> Isola os segredos: apagar/rotacionar a chave de um provedor não afeta o outro.</li>
 <li><strong>remember me / Forget:</strong> salva ou apaga o blob do provedor atual.</li>
+<li><strong>StoryGenerate</strong> usa a <strong>mesma chave OpenRouter</strong> do cofre (roteirista e narração) — salvar/esquecer em um vale para o outro.</li>
 </ul>
 
 <h2 id="contexto">Contexto e memória</h2>
@@ -376,7 +470,7 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">--prompt / --prompt-file</code></td><td>Texto do prompt (arquivo soma ao texto)</td></tr>
 <tr><td><code class="inline">--output-dir</code></td><td>Onde salvam imagens + CSV (padrão: <code class="inline">~/Imagens/ImageGenerate</code>)</td></tr>
 <tr><td><code class="inline">--context-dir / --memory-dir</code></td><td>Pastas de contexto (.md/.txt) e referências visuais</td></tr>
-<tr><td><code class="inline">--dynamic-output / --dynamic-context / --dynamic-memory RANGE</code><br><code class="inline">--dynamic-…-start START</code></td><td>Dynamic: as gerações usam <code class="inline">&lt;pasta&gt;/START</code> … <code class="inline">&lt;pasta&gt;/RANGE</code> e voltam ao START (START padrão 1; RANGE natural &gt; START; exige mais de uma geração)</td></tr>
+<tr><td><code class="inline">--dynamic-output / --dynamic-context / --dynamic-memory RANGE</code><br><code class="inline">--dynamic-…-start START</code><br><code class="inline">--dynamic-…-batch BATCH</code></td><td>Dynamic: as gerações usam <code class="inline">&lt;pasta&gt;/START</code> … <code class="inline">&lt;pasta&gt;/RANGE</code>, BATCH seguidas em cada pasta, e voltam ao START (START e BATCH padrão 1; RANGE natural &gt; START; exige mais de uma geração)</td></tr>
 <tr><td><code class="inline">--provider / --model</code></td><td>Provedor e modelo de imagem</td></tr>
 <tr><td><code class="inline">--prop / --resolution / --output-format</code></td><td>Proporção, tier de resolução, formato</td></tr>
 <tr><td><code class="inline">--seed / --count</code></td><td>Seed de reprodutibilidade / nº de imagens (natural 1–30; acima de 1 pede confirmação nas interfaces por causa do custo)</td></tr>
@@ -384,17 +478,22 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td><code class="inline">--summary-model</code></td><td>Chat que resume o prompt (vazio = truncamento local grátis)</td></tr>
 <tr><td><code class="inline">--timeout / --dry-run</code></td><td>Timeout HTTP / placeholder local sem gastar nada</td></tr>
 <tr><td><code class="inline">--gui / --list-log</code></td><td>Abre a GUI / imprime o CSV e sai</td></tr>
+<tr><td><code class="inline">--analyse DIR</code> (repetível) <code class="inline">--choose LINHA:COLUNA</code> <code class="inline">--oldest-first</code> <code class="inline">--chosen-dir</code></td><td>Aba Analyse no terminal: imprime a tabela das pastas; com <code class="inline">--choose</code> copia as escolhidas (1 por linha) + relatório para <code class="inline">&lt;chosen-dir&gt;/&lt;data_hora&gt;/</code> (padrão <code class="inline">&lt;output-dir&gt;/chosen</code>)</td></tr>
 </table>
 
 <h2 id="arquivos">Arquivos e pastas</h2>
 <table>
 <tr><th>Caminho</th><th>Função</th></tr>
 <tr><td><code class="inline">~/Imagens/ImageGenerate/</code></td><td>Imagens + <code class="inline">log_image_generate.csv</code> (padrão, configurável)</td></tr>
-<tr><td><code class="inline">~/.config/image_generate/</code></td><td>Cofre: <code class="inline">*.fkey</code>, <code class="inline">*_api_key.enc</code>, <code class="inline">config.json</code></td></tr>
+<tr><td><code class="inline">&lt;Output dir&gt;/chosen/&lt;data_hora&gt;/</code></td><td>Cópias escolhidas na aba Analyse + <code class="inline">report.md</code> / <code class="inline">report.csv</code></td></tr>
+<tr><td><code class="inline">~/Imagens/StoryGenerate/&lt;título&gt;/</code></td><td>Histórias: <code class="inline">storyboard.png</code>, <code class="inline">roteiro.md</code>, <code class="inline">audio.wav</code>, <code class="inline">story.json</code> (+ <code class="inline">log_story_generate.csv</code> na pasta de saída)</td></tr>
+<tr><td><code class="inline">~/.config/image_generate/</code></td><td>Cofre: <code class="inline">*.fkey</code>, <code class="inline">*_api_key.enc</code>, <code class="inline">config.json</code> (ImageGenerate) e <code class="inline">story_config.json</code> (StoryGenerate)</td></tr>
+<tr><td><code class="inline">~/.cache/image_generate/thumbs/</code></td><td>Miniaturas da aba Analyse (pode apagar; são refeitas)</td></tr>
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (arquivo único)</td></tr>
+<tr><td><code class="inline">story_generate.py</code></td><td>StoryGenerate: CLI + GUI (arquivo único)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI</td></tr>
 <tr><td><code class="inline">web/frontend/src/</code></td><td>React: <code class="inline">App.tsx</code>, <code class="inline">api.ts</code>, <code class="inline">tabs/Generate|Model|Dir.tsx</code></td></tr>
-<tr><td><code class="inline">img/logo.png / img/logo+titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
+<tr><td><code class="inline">img/logo.png / img/logo-titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
 <tr><td><code class="inline">install.sh</code></td><td>Gera e instala o launcher Linux (o <code class="inline">.desktop</code> é local, ignorado no git)</td></tr>
 <tr><td><code class="inline">docs.html</code></td><td>Esta documentação (arquivo único, sem dependências)</td></tr>
 </table>
@@ -409,6 +508,11 @@ python3 image_generate.py --list-log                           # mostra o histó
 <tr><td>Resumo estranho no log</td><td>Modelo verboso → o sanitizador já faz fallback para truncamento; troque o <code class="inline">summary_model</code> por um menor</td></tr>
 <tr><td>“remember me” desabilitado</td><td>Falta <code class="inline">pip install cryptography</code></td></tr>
 <tr><td>Erro de rede no <code class="inline">/api/*</code></td><td>Backend parado → <code class="inline">python3 web/server.py</code> (porta 8000)</td></tr>
+<tr><td><code class="inline">sudo bash install.sh</code> e o atalho não aparece</td><td>Com sudo ele iria para o root → rode <code class="inline">bash install.sh</code> sem sudo (agora ele avisa e recusa)</td></tr>
+<tr><td>Analyse sem miniaturas (“no preview”)</td><td>JPEG/WebP precisam do ImageMagick ou ffmpeg → <code class="inline">sudo apt install imagemagick</code></td></tr>
+<tr><td>StoryGenerate: “não aceita imagem”</td><td>O roteirista escolhido só lê texto → use um modelo com visão (a mensagem sugere alguns, inclusive grátis)</td></tr>
+<tr><td>StoryGenerate: HTTP 429 em modelos <code class="inline">:free</code></td><td>Fila compartilhada lotada → o app tenta de novo 3× (5/15/30 s); use uma <a href="#story-roteirista">cadeia de fallback</a> <code class="inline">grátis;pago</code> ou tente mais tarde</td></tr>
+<tr><td>StoryGenerate: janela parece parada</td><td>Olhe o contador <em>(N s)</em> no status: se sobe, está esperando a resposta do modelo (até 3 min por chamada)</td></tr>
 </table>
 </main>
 
@@ -424,6 +528,12 @@ python3 image_generate.py --list-log                           # mostra o histó
 <a href="#web-generate" class="l3">Generate</a>
 <a href="#web-model" class="l3">Model</a>
 <a href="#web-dir" class="l3">Dir + picker</a>
+<a href="#story">StoryGenerate</a>
+<a href="#story-abas" class="l3">Abas</a>
+<a href="#story-roteirista" class="l3">Roteirista</a>
+<a href="#story-narracao" class="l3">Narração</a>
+<a href="#story-log" class="l3">Log e retry</a>
+<a href="#story-cli" class="l3">CLI</a>
 <a href="#pipeline">Pipeline</a>
 <a href="#provedores">Provedores</a>
 <a href="#chaves">Chaves</a>
