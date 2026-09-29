@@ -1979,6 +1979,7 @@ def build_analysis_rows(folders: list[str | Path], newest_first: bool = True
 
 THUMB_SIZE = 150
 THUMB_ZOOM_LEVELS = (100, 150, 220, 320, 480)  # Analyse tab Zoom -/+ (pixels)
+PREVIEW_SIZE = 720  # Analyse hover preview (clamped to 75% of the screen)
 
 
 def thumbnail_cache_dir() -> Path:
@@ -3129,6 +3130,7 @@ def run_gui(defaults: dict | None = None) -> None:
     def analyse_render(keep: set[str] | None = None) -> None:
         """Rebuild the chips and the grid; keep selections by image path."""
         keep = analyse_pick_paths() if keep is None else keep
+        preview_hide()  # the cells are rebuilt
         for child in an_chips.winfo_children():
             child.destroy()
         for index, folder in enumerate(analyse["folders"]):
@@ -3189,10 +3191,11 @@ def run_gui(defaults: dict | None = None) -> None:
                 for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                     label.bind(seq, an_wheel)
                 stat = cell.stat()
-                attach_help(label, f"{cell.name}\n{Path(cell).parent}\nmodified "
-                                   f"{dt.datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}"
-                                   f" · {stat.st_size / 1024:.0f} KB\n(click = select, "
-                                   "double-click = open)")
+                bind_preview(label, cell,
+                             f"{cell.name}  ·  {Path(cell).parent}\nmodified "
+                             f"{dt.datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}"
+                             f" · {stat.st_size / 1024:.0f} KB  ·  click = select, "
+                             "double-click = open full size")
                 analyse["cells"][(r, c)] = label
                 pending.append((r, c, cell))
         analyse_paint()
@@ -3255,6 +3258,98 @@ def run_gui(defaults: dict | None = None) -> None:
             parts.append(f"{c + 1}. {Path(folder).name}: {total} image(s), {chosen} selected")
         an_info_var.set("  |  ".join(parts))
         choose_btn.configure(state=tk.NORMAL if picks else tk.DISABLED)
+
+    # Hover preview: a bigger image (up to PREVIEW_SIZE, 75% of the screen)
+    # in a floating window next to the pointer, kept inside the screen.
+    preview: dict = {"win": None, "after": None, "path": None, "images": {}}
+
+    def preview_hide(_event: object = None) -> None:
+        if preview["after"] is not None:
+            root.after_cancel(preview["after"])
+            preview["after"] = None
+        if preview["win"] is not None:
+            try:
+                preview["win"].destroy()
+            except tk.TclError:
+                pass
+            preview["win"] = None
+        preview["path"] = None
+
+    def preview_place(x: int, y: int) -> None:
+        win = preview["win"]
+        if win is None:
+            return
+        win.update_idletasks()
+        width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+        left = x + 24 if x + 24 + width <= screen_w else max(0, x - 24 - width)
+        top = min(max(0, y - height // 3), max(0, screen_h - height))
+        win.wm_geometry(f"+{left}+{top}")
+
+    def preview_show(path: Path, caption: str, x: int, y: int) -> None:
+        preview["after"] = None
+        size = min(PREVIEW_SIZE, int(min(root.winfo_screenwidth(),
+                                         root.winfo_screenheight()) * 0.75))
+        win = tk.Toplevel(root)
+        win.wm_overrideredirect(True)
+        win.wm_attributes("-topmost", True)
+        frame = tk.Frame(win, background="#222", padx=4, pady=4)
+        frame.pack()
+        image_label = tk.Label(frame, text="loading preview…", foreground="#ddd",
+                               background="#222", width=40, height=12)
+        image_label.pack()
+        tk.Label(frame, text=caption, foreground="#eee", background="#222", justify=tk.LEFT,
+                 wraplength=max(320, size)).pack(anchor=tk.W, pady=(4, 0))
+        preview.update(win=win, path=path)
+        preview_place(x, y)
+
+        def set_image(image: object) -> None:
+            if preview["win"] is not win or preview["path"] != path:
+                return  # pointer already left this image
+            if image is None:
+                image_label.configure(text="no preview (install ImageMagick)")
+            else:
+                image_label.configure(image=image, text="", width=0, height=0)
+            preview_place(x, y)
+
+        key = f"{path}@{size}"
+        if key in preview["images"]:
+            set_image(preview["images"][key])
+            return
+
+        def work() -> None:
+            thumb = make_thumbnail(path, size)
+            root.after(0, lambda: load(thumb))
+
+        def load(thumb: Path | None) -> None:
+            image = None
+            try:
+                if thumb is not None:
+                    image = tk.PhotoImage(file=str(thumb))
+                elif path.suffix.lower() in (".png", ".gif"):
+                    full = tk.PhotoImage(file=str(path))
+                    factor = max(1, math.ceil(max(full.width(), full.height()) / size))
+                    image = full.subsample(factor, factor)
+            except tk.TclError:
+                image = None
+            if image is not None:
+                if len(preview["images"]) >= 24:  # keep memory bounded
+                    preview["images"].pop(next(iter(preview["images"])))
+                preview["images"][key] = image
+            set_image(image)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def bind_preview(widget: tk.Widget, path: Path, caption: str) -> None:
+        def enter(event: object) -> None:
+            preview_hide()
+            x, y = event.x_root, event.y_root  # type: ignore[attr-defined]
+            preview["after"] = root.after(350, lambda: preview_show(path, caption, x, y))
+
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", preview_hide)
+        for seq in ("<Button-1>", "<Double-1>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, preview_hide, add="+")
 
     def analyse_zoom(step: int) -> None:
         levels = THUMB_ZOOM_LEVELS
