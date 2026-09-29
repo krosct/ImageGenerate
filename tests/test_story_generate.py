@@ -578,6 +578,18 @@ class PipelineTest(IsolatedMixin):
         titles = [meta["title"] for _f, meta in sg.list_stories(self.tmp / "out")]
         self.assertEqual(titles, ["Teste b", "Teste a"])
 
+    def test_story_list_label(self):
+        folder = Path("/x/Um dia")
+        meta = {"title": "Um dia", "source_image": "/p/muse 1/a.png", "style": "connective"}
+        self.assertEqual(sg.story_list_label(folder, meta), "Um dia - muse 1 - Narrativo")
+        self.assertEqual(sg.story_list_label(folder, {**meta, "style": "descriptive"}),
+                         "Um dia - muse 1 - Descritivo")
+        # made before styles existed -> Descritivo; no source -> title + style
+        self.assertEqual(sg.story_list_label(folder, {"title": "Um dia",
+                                                      "source_image": "/p/muse 1/a.png"}),
+                         "Um dia - muse 1 - Descritivo")
+        self.assertEqual(sg.story_list_label(folder, {}), "Um dia - Descritivo")
+
     def test_safe_folder_name(self):
         self.assertEqual(sg.safe_folder_name('A/B: "c"?'), "A B c")
         self.assertEqual(sg.safe_folder_name("  ..  "), "Historia")

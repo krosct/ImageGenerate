@@ -1827,6 +1827,23 @@ def format_clock(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def style_short_label(style: str) -> str:
+    """"Narrativo" / "Descritivo": the style label without its explanation."""
+    return style_label(style).split(" (")[0]
+
+
+def story_list_label(folder: Path, meta: dict) -> str:
+    """Player list entry: "<title> - <storyboards dir name> - <writer style>"
+    (the folder the storyboard came from, as in the Generate log column, and
+    Narrativo/Descritivo; stories older than the styles are Descritivo)."""
+    parts = [str(meta.get("title") or folder.name)]
+    source = str(meta.get("source_image") or "")
+    if source:
+        parts.append(Path(source).parent.name)
+    parts.append(style_short_label(story_style(meta)))
+    return " - ".join(parts)
+
+
 def find_storyboard_image(folder: Path, meta: dict) -> Path | None:
     """Image the GUI can show: preview.png, else a PNG/GIF storyboard."""
     preview = folder / PREVIEW_PNG
@@ -2710,21 +2727,32 @@ def run_gui(defaults: dict | None = None) -> None:
     # ---- Player tab ----
     player_top = ttk.Frame(tab_player)
     player_top.pack(fill=tk.BOTH, expand=True)
-    list_frame = ttk.Frame(player_top)
-    list_frame.pack(side=tk.LEFT, fill=tk.Y)
+    # list | storyboard | script: all three in one PanedWindow, so every
+    # divider can be dragged (the list used to have a fixed width)
+    panes = ttk.PanedWindow(player_top, orient=tk.HORIZONTAL)
+    panes.pack(fill=tk.BOTH, expand=True)
+    list_frame = ttk.Frame(panes, padding=(0, 0, 6, 0))
     ttk.Label(list_frame, text="Stories (newest first)").pack(anchor=tk.W)
-    story_list = tk.Listbox(list_frame, width=28, exportselection=False)
-    story_list.pack(fill=tk.Y, expand=True)
+    list_box_frame = ttk.Frame(list_frame)
+    list_box_frame.pack(fill=tk.BOTH, expand=True)
+    story_list = tk.Listbox(list_box_frame, width=50, exportselection=False)
+    list_xscroll = ttk.Scrollbar(list_box_frame, orient=tk.HORIZONTAL, command=story_list.xview)
+    list_yscroll = ttk.Scrollbar(list_box_frame, orient=tk.VERTICAL, command=story_list.yview)
+    story_list.configure(xscrollcommand=list_xscroll.set, yscrollcommand=list_yscroll.set)
+    story_list.grid(row=0, column=0, sticky=tk.NSEW)
+    list_yscroll.grid(row=0, column=1, sticky=tk.NS)
+    list_xscroll.grid(row=1, column=0, sticky=tk.EW)
+    list_box_frame.rowconfigure(0, weight=1)
+    list_box_frame.columnconfigure(0, weight=1)
     ttk.Button(list_frame, text="Refresh", command=lambda: refresh_stories()).pack(
         fill=tk.X, pady=(4, 0))
     ttk.Button(list_frame, text="Open folder",
                command=lambda: state["folder"] and ig_open(str(state["folder"]))).pack(fill=tk.X)
     story_folders: list[Path] = []
 
-    panes = ttk.PanedWindow(player_top, orient=tk.HORIZONTAL)
-    panes.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
     image_canvas = tk.Canvas(panes, background="#111", highlightthickness=0, width=620)
     script_frame = ttk.Frame(panes)
+    panes.add(list_frame, weight=1)
     panes.add(image_canvas, weight=3)
     panes.add(script_frame, weight=2)
     script_text = tk.Text(script_frame, wrap=tk.WORD, font=("TkDefaultFont", 11), width=38,
@@ -2779,7 +2807,7 @@ def run_gui(defaults: dict | None = None) -> None:
         story_list.delete(0, tk.END)
         story_folders.clear()
         for folder, meta in stories:
-            story_list.insert(tk.END, meta.get("title", folder.name))
+            story_list.insert(tk.END, story_list_label(folder, meta))
             story_folders.append(folder)
         target = select or state["folder"]
         if target is not None:
