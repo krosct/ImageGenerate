@@ -337,6 +337,7 @@ CONFIG_KEYS = (
     "dry_run",
     "analyse",
     "chosen_dir",
+    "prompt",
 )
 
 
@@ -396,6 +397,8 @@ def sanitize_gui_config(data: dict) -> dict:
     clean["analyse"] = [d for d in dirs if isinstance(d, str) and d.strip()] \
         if isinstance(dirs, list) else []
     clean["chosen_dir"] = str(data.get("chosen_dir", "") or "")
+    prompt = data.get("prompt", "")
+    clean["prompt"] = prompt if isinstance(prompt, str) else ""
     return clean
 
 
@@ -1954,7 +1957,9 @@ REPORT_FIELDS = [
 
 
 def default_chosen_dir(output_dir: str | None = None) -> str:
-    return str(Path(output_dir or default_output_dir()).expanduser() / CHOSEN_DIRNAME)
+    """<parent of the output dir>/chosen: next to the folders being compared
+    (e.g. output .../generated/muse 2 -> .../generated/chosen)."""
+    return str(Path(output_dir or default_output_dir()).expanduser().parent / CHOSEN_DIRNAME)
 
 
 def list_folder_images(folder: str | Path) -> list[Path]:
@@ -1979,7 +1984,29 @@ def build_analysis_rows(folders: list[str | Path], newest_first: bool = True
 
 THUMB_SIZE = 150
 THUMB_ZOOM_LEVELS = (100, 150, 220, 320, 480)  # Analyse tab Zoom -/+ (pixels)
-PREVIEW_SIZE = 720  # Analyse hover preview (clamped to 75% of the screen)
+PREVIEW_STEP = 80  # hover preview sizes are multiples of this (better cache reuse)
+PREVIEW_GAP = 28   # pixels between the pointer and the preview window
+PREVIEW_CAPTION_H = 80
+
+
+def preview_geometry(img_w: int, img_h: int, pointer_x: int, screen_w: int,
+                     screen_h: int) -> tuple[int, str]:
+    """Longest side (px) and side ("right"/"left" of the pointer) of the Analyse
+    hover preview: as big as the wider free side of the screen allows (at most
+    75% of its width, 85% of its height minus the caption), never larger than
+    the image itself and never over the pointer (that would fire <Leave> and
+    make the preview blink)."""
+    right = screen_w - pointer_x - PREVIEW_GAP - 8
+    left = pointer_x - PREVIEW_GAP - 8
+    side = "right" if right >= left else "left"
+    box_w = min(screen_w * 0.75, max(right, left))
+    box_h = screen_h * 0.85 - PREVIEW_CAPTION_H
+    img_w, img_h = max(1, img_w), max(1, img_h)
+    scale = min(box_w / img_w, box_h / img_h)
+    if scale >= 1:  # fits whole: show it at its own size
+        return max(img_w, img_h), side
+    longest = max(img_w, img_h) * scale
+    return max(2 * PREVIEW_STEP, int(longest // PREVIEW_STEP) * PREVIEW_STEP), side
 
 
 def thumbnail_cache_dir() -> Path:
@@ -2546,7 +2573,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="With --analyse: align rows from the oldest image instead.")
     parser.add_argument("--chosen-dir", default=None,
                         help=f"With --choose: where the '{CHOSEN_DIRNAME}' copies go "
-                             f"(default: <output-dir>/{CHOSEN_DIRNAME}).")
+                             f"(default: <parent of output-dir>/{CHOSEN_DIRNAME}).")
     return parser
 
 
@@ -3085,8 +3112,10 @@ def run_gui(defaults: dict | None = None) -> None:
         an_canvas.bind(seq, an_wheel)
 
     an_info_var = tk.StringVar(value="Add at least one folder to start.")
-    ttk.Label(tab_analyse, textvariable=an_info_var, wraplength=820, justify=tk.LEFT).pack(
-        fill=tk.X, pady=(6, 2))
+    an_info = ttk.Label(tab_analyse, textvariable=an_info_var, justify=tk.LEFT)
+    an_info.pack(fill=tk.X, pady=(6, 2))
+    # wrap only when the text really does not fit the current window width
+    an_info.bind("<Configure>", lambda e: an_info.configure(wraplength=max(200, e.width - 8)))
     an_bottom = ttk.Frame(tab_analyse)
     an_bottom.pack(fill=tk.X)
     ttk.Label(an_bottom, text="Chosen dir:").pack(side=tk.LEFT)
@@ -3094,7 +3123,7 @@ def run_gui(defaults: dict | None = None) -> None:
     chosen_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
     attach_help(chosen_entry, f"Where Choose puts its copies: a new <chosen dir>/<date_time>/ "
                               f"folder with the images + {REPORT_MD} and {REPORT_CSV}. Empty = "
-                              f"<Output dir>/{CHOSEN_DIRNAME}.")
+                              f"<parent of Output dir>/{CHOSEN_DIRNAME}.")
     ttk.Button(an_bottom, text="Browse", command=lambda: pick_dir(chosen_var)).pack(side=tk.LEFT)
     choose_btn = ttk.Button(an_bottom, text="Choose", style="Generate.TButton",
                             command=lambda: analyse_choose())
@@ -3259,7 +3288,7 @@ def run_gui(defaults: dict | None = None) -> None:
         an_info_var.set("  |  ".join(parts))
         choose_btn.configure(state=tk.NORMAL if picks else tk.DISABLED)
 
-    # Hover preview: a bigger image (up to PREVIEW_SIZE, 75% of the screen)
+    # Hover preview: as big as the free side of the screen allows (preview_geometry)
     # in a floating window next to the pointer, kept inside the screen.
     preview: dict = {"win": None, "after": None, "path": None, "images": {}}
 
@@ -3275,46 +3304,48 @@ def run_gui(defaults: dict | None = None) -> None:
             preview["win"] = None
         preview["path"] = None
 
-    def preview_place(x: int, y: int) -> None:
-        win = preview["win"]
-        if win is None:
-            return
-        win.update_idletasks()
-        width, height = win.winfo_reqwidth(), win.winfo_reqheight()
-        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
-        left = x + 24 if x + 24 + width <= screen_w else max(0, x - 24 - width)
-        top = min(max(0, y - height // 3), max(0, screen_h - height))
-        win.wm_geometry(f"+{left}+{top}")
-
     def preview_show(path: Path, caption: str, x: int, y: int) -> None:
+        """Build the preview window hidden and map it only when the image is
+        ready and the window already has its final place (no flash at the
+        screen corner, no empty dark box)."""
         preview["after"] = None
-        size = min(PREVIEW_SIZE, int(min(root.winfo_screenwidth(),
-                                         root.winfo_screenheight()) * 0.75))
+        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+        _bytes, img_w, img_h = inspect_image(path)
+        if not img_w or not img_h:
+            img_w, img_h = 1600, 1000
+        size, side = preview_geometry(img_w, img_h, x, screen_w, screen_h)
         win = tk.Toplevel(root)
+        win.withdraw()  # stays invisible until placed
         win.wm_overrideredirect(True)
         win.wm_attributes("-topmost", True)
-        frame = tk.Frame(win, background="#222", padx=4, pady=4)
-        frame.pack()
-        image_label = tk.Label(frame, text="loading preview…", foreground="#ddd",
-                               background="#222", width=40, height=12)
-        image_label.pack()
-        tk.Label(frame, text=caption, foreground="#eee", background="#222", justify=tk.LEFT,
-                 wraplength=max(320, size)).pack(anchor=tk.W, pady=(4, 0))
         preview.update(win=win, path=path)
-        preview_place(x, y)
 
-        def set_image(image: object) -> None:
+        def reveal(image: object) -> None:
             if preview["win"] is not win or preview["path"] != path:
                 return  # pointer already left this image
+            frame = tk.Frame(win, background="#222", padx=4, pady=4)
+            frame.pack()
             if image is None:
-                image_label.configure(text="no preview (install ImageMagick)")
+                tk.Label(frame, text="no preview (install ImageMagick)", foreground="#ddd",
+                         background="#222", padx=20, pady=20).pack()
+                width = 320
             else:
-                image_label.configure(image=image, text="", width=0, height=0)
-            preview_place(x, y)
+                tk.Label(frame, image=image, background="#222", borderwidth=0).pack()
+                width = image.width()  # type: ignore[attr-defined]
+            tk.Label(frame, text=caption, foreground="#eee", background="#222",
+                     justify=tk.LEFT, wraplength=max(320, width)).pack(anchor=tk.W,
+                                                                      pady=(4, 0))
+            win.update_idletasks()  # sizes are computed while still withdrawn
+            win_w, win_h = win.winfo_reqwidth(), win.winfo_reqheight()
+            left = x + PREVIEW_GAP if side == "right" else x - PREVIEW_GAP - win_w
+            left = min(max(0, left), max(0, screen_w - win_w))
+            top = min(max(0, y - win_h // 3), max(0, screen_h - win_h))
+            win.wm_geometry(f"{win_w}x{win_h}+{left}+{top}")
+            win.deiconify()
 
         key = f"{path}@{size}"
         if key in preview["images"]:
-            set_image(preview["images"][key])
+            reveal(preview["images"][key])
             return
 
         def work() -> None:
@@ -3333,10 +3364,10 @@ def run_gui(defaults: dict | None = None) -> None:
             except tk.TclError:
                 image = None
             if image is not None:
-                if len(preview["images"]) >= 24:  # keep memory bounded
+                if len(preview["images"]) >= 12:  # big images: keep memory bounded
                     preview["images"].pop(next(iter(preview["images"])))
                 preview["images"][key] = image
-            set_image(image)
+            reveal(image)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -3478,6 +3509,8 @@ def run_gui(defaults: dict | None = None) -> None:
     prompt_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
     prompt_text = tk.Text(prompt_frame, height=8, wrap=tk.WORD)
     prompt_text.pack(fill=tk.BOTH, expand=True)
+    if merged.get("prompt"):  # last prompt (config.json) or --gui --prompt
+        prompt_text.insert("1.0", str(merged["prompt"]))
 
     # ---- Injection tab: per-generation values for {{variables}} ----
     def current_template_vars() -> list[str]:
@@ -3949,6 +3982,7 @@ def run_gui(defaults: dict | None = None) -> None:
                 "dry_run": bool(dry_var.get()),
                 "analyse": list(analyse["folders"]),
                 "chosen_dir": chosen_var.get().strip(),
+                "prompt": prompt_text.get("1.0", "end-1c"),
             })
         except OSError:
             pass
@@ -3999,6 +4033,7 @@ def main(argv: list[str] | None = None) -> int:
             "--output-format": "output_format",
             "--analyse": "analyse",
             "--chosen-dir": "chosen_dir",
+            "--prompt": "prompt",
         }
         gui_defaults = {}
         for flag, key in flag_map.items():

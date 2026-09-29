@@ -1969,6 +1969,31 @@ class AnalyseTest(IsolatedEnvMixin):
             self.assertTrue(thumb.is_file())
             self.assertEqual(ig.make_thumbnail(a / "img_0.png", size=16), thumb)  # cached
 
+    def test_preview_geometry(self):
+        # 1920x1080 screen, 1920x1280 image: big near the edges, on the wider side
+        self.assertEqual(ig.preview_geometry(1920, 1280, 200, 1920, 1080), (1200, "right"))
+        self.assertEqual(ig.preview_geometry(1920, 1280, 1700, 1920, 1080), (1200, "left"))
+        size, side = ig.preview_geometry(1920, 1280, 960, 1920, 1080)
+        self.assertEqual(side, "right")
+        self.assertLessEqual(size, 1920 - 960 - ig.PREVIEW_GAP)  # never over the pointer
+        self.assertEqual(size % ig.PREVIEW_STEP, 0)
+        # never upscaled past the image itself
+        self.assertEqual(ig.preview_geometry(300, 200, 100, 1920, 1080), (300, "right"))
+        # tall image limited by the screen height minus the caption
+        size, _ = ig.preview_geometry(1000, 3000, 100, 1920, 1080)
+        self.assertLessEqual(size, 1080 * 0.85 - ig.PREVIEW_CAPTION_H)
+
+    def test_default_chosen_dir_is_next_to_output_dir(self):
+        self.assertEqual(ig.default_chosen_dir("/p/generated/muse 2"), "/p/generated/chosen")
+        self.assertEqual(Path(ig.default_chosen_dir()).parent,
+                         Path(ig.default_output_dir()).parent)
+
+    def test_config_keeps_prompt(self):
+        ig.save_gui_config({"prompt": "um {{animal}}\nsegunda linha", "dry_run": True})
+        self.assertEqual(ig.sanitize_gui_config(ig.load_gui_config())["prompt"],
+                         "um {{animal}}\nsegunda linha")
+        self.assertEqual(ig.sanitize_gui_config({"prompt": 3})["prompt"], "")
+
     def test_config_keeps_analyse_folders(self):
         clean = ig.sanitize_gui_config({"analyse": ["/a", "", 3, "/b"], "chosen_dir": "/c"})
         self.assertEqual((clean["analyse"], clean["chosen_dir"]), (["/a", "/b"], "/c"))
