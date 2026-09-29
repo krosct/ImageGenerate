@@ -84,6 +84,21 @@ export type JobEvent =
   | { status: 'cancelled' }
   | { status: 'error'; error: string }
 
+// The dev backend starts alongside Vite, so the very first call can race its
+// startup. Retry a few times before giving up.
+export async function retry<T>(fn: () => Promise<T>, tries = 8, delayMs = 400): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      return await fn()
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastError
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },

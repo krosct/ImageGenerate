@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, AppConfig, DynamicDirs, ProvidersResponse } from './api'
+import { api, retry, AppConfig, DynamicDirs, ProvidersResponse } from './api'
 import Generate from './tabs/Generate'
 import Model from './tabs/Model'
 import Dir from './tabs/Dir'
@@ -38,7 +38,7 @@ export default function App() {
   })
 
   useEffect(() => {
-    api.providers().then(setMeta).catch(() => setNotice('cannot reach API (is web/server.py running?)'))
+    retry(() => api.providers()).then(setMeta).catch(() => setNotice('cannot reach API (is web/server.py running?)'))
     api.config().then((c) => {
       setCfg({ ...DEFAULTS, ...c })
       if (c.prompt) setPrompt(c.prompt)  // restore the last prompt (web or desktop)

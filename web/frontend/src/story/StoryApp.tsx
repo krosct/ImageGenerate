@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, StoryConfig, StoryMeta, StoryVoice } from '../api'
+import { api, retry, StoryConfig, StoryMeta, StoryVoice } from '../api'
 import StoryGenerateTab from './StoryGenerateTab'
 import StoryPlayer from './StoryPlayer'
 
@@ -31,7 +31,7 @@ export default function StoryApp({ notice, tab, setTab }: {
     try { setKeyInfo((await api.keys()).openrouter ?? null) } catch { /* offline */ }
   }
   useEffect(() => {
-    api.storyMeta().then(setMeta).catch(() => notice('cannot reach API (is web/server.py running?)'))
+    retry(() => api.storyMeta()).then(setMeta).catch(() => notice('cannot reach API (is web/server.py running?)'))
     api.storyConfig().then((c) => setCfg({ ...EMPTY, ...c })).catch(() => undefined)
     void reloadKeys()
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps

@@ -77,8 +77,9 @@ python3 web/server.py   # abre http://127.0.0.1:8000
 
 Para desenvolver com hot reload, basta `npm run dev` em `web/frontend`: o Vite sobe
 o frontend (`http://127.0.0.1:5173`) e também o backend (`web/server.py`), e
-derruba o backend ao sair. Se o backend já estiver rodando na porta 8000, ele é
-reaproveitado. Use `IMAGE_GENERATE_PYTHON` para apontar para outro interpretador.
+derruba o backend ao sair. A porta 8000 só é reaproveitada se já for o próprio
+backend; se estiver ocupada por outro app, o Vite escolhe uma porta livre. Use
+`IMAGE_GENERATE_PYTHON` para apontar para outro interpretador.
 
 A web tem **as mesmas funções dos apps desktop**, com os mesmos arquivos de configuração (o que você muda num aparece no outro):
 - no topo, o seletor **ImageGenerate | StoryGenerate** troca de app (`http://127.0.0.1:8000/#story` abre direto no StoryGenerate);
