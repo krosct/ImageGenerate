@@ -15,7 +15,7 @@ E transforme storyboards em histórias narradas com o **StoryGenerate** 🎙️
 - **Escolhe modelo, proporção, resolução, formato** — `provider/model`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
 - **Salva log das requisições** — `log_image_generate.csv`, mostrado da mais nova para a mais velha e atualizado a cada imagem (botão direito → *Use prompt*).
 - **Ordenar e filtrar a lista (nas duas GUIs)** — clique no cabeçalho para ordenar; botão direito no cabeçalho abre um filtro estilo planilha (valores com contagem, “contém…”). CLI: `--list-log --log-filter model=muse --log-sort cost_usd:desc`.
-- **Lembra de tudo** — pastas, modelos, opções e o **último prompt** voltam ao reabrir a GUI.
+- **Lembra de tudo** — pastas, modelos, opções e o **último prompt** voltam ao reabrir a GUI (o prompt é compartilhado com a versão web, que usa o mesmo config sem apagar o que só a GUI guarda).
 - **Browse inteligente** — abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe mais próxima.
 - **Teste offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
 - **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o core.
@@ -75,6 +75,11 @@ Sirva com `server.py` e acesse em `http://127.0.0.1:8000`.
 python3 web/server.py   # abre http://127.0.0.1:8000
 ```
 
+A web tem **as mesmas funções dos apps desktop**, com os mesmos arquivos de configuração (o que você muda num aparece no outro):
+- no topo, o seletor **ImageGenerate | StoryGenerate** troca de app (`http://127.0.0.1:8000/#story` abre direto no StoryGenerate);
+- ImageGenerate: abas **Generate**, **Model**, **Dir**, **Analyse** (pastas lado a lado, prévia grande, Zoom −/+, **Choose** com relatório) e **Injection**; o histórico ordena clicando no cabeçalho e filtra com o botão direito no cabeçalho, como na GUI;
+- StoryGenerate: abas **Generate** (log com falhas em vermelho, *Retry failed*, menu do botão direito com *Copy row* / *Open in Player* / *Delete…*), **Model**, **Voices** (*Check voices*) e **Player** (áudio no navegador com a cena atual destacada, zoom/arrastar no storyboard, divisórias arrastáveis e os mesmos atalhos: espaço, ←/→, ↑/↓).
+
 <p align="center"><img src="img/guiweb.png" alt="Web" width="520" /></p>
 
 ## 🧑‍💻 Versão CLI (terminal)
@@ -131,7 +136,7 @@ python3 image_generate.py --list-log
 - storyboards já transformados **no estilo selecionado** são pulados (mesmo conteúdo de imagem) para não gastar de novo — ter a versão Descritiva não impede gerar a Narrativa; *redo existing* refaz todos;
 - a coluna *storyboards dir* mostra de qual pasta veio cada história.
 
-**Aba Player:** a lista mostra cada história como *Título - pasta de storyboards - roteirista* (ex.: `O Livro Devolvido - muse 1 - Narrativo`); o player mostra o storyboard com o roteiro ao lado (arraste as divisórias para redimensionar lista, imagem e roteiro) e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓).
+**Aba Player:** a lista mostra cada história como *Título - pasta de storyboards - roteirista* (ex.: `O Livro Devolvido - muse 1 - Narrativo`); o player mostra o storyboard com o roteiro ao lado (arraste as divisórias para redimensionar lista, imagem e roteiro; na imagem, a roda do mouse dá zoom, arrastar move e o botão direito volta ao padrão) e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓).
 
 ```bash
 python3 story_generate.py --gui

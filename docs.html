@@ -150,6 +150,8 @@ kbd{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1p
   <a href="#web-generate" class="sub">Aba Generate</a>
   <a href="#web-model" class="sub">Aba Model</a>
   <a href="#web-dir" class="sub">Aba Dir + folder picker</a>
+  <a href="#web-analyse" class="sub">Aba Analyse</a>
+  <a href="#web-story" class="sub">StoryGenerate na web</a>
   <a href="#story">StoryGenerate</a>
   <a href="#story-abas" class="sub">Abas</a>
   <a href="#story-roteirista" class="sub">Roteirista</a>
@@ -311,26 +313,40 @@ python3 image_generate.py --analyse ./A --analyse ./B --choose 1:2 --choose 3:1 
 
 <h2 id="web">Web (navegador)</h2>
 <p>Mesmo núcleo, visual moderno escuro. Sirva o build e abra <code class="inline">http://127.0.0.1:8000</code>.</p>
+<p>A web tem <strong>as mesmas funções dos dois apps desktop</strong>: o seletor <strong>ImageGenerate | StoryGenerate</strong> no topo troca de app (<code class="inline">/#story</code> abre direto no StoryGenerate) e as configurações são os mesmos <code class="inline">config.json</code> / <code class="inline">story_config.json</code> — o que muda num aparece no outro.</p>
 
 <h3 id="web-generate">Aba Generate</h3>
 <ul>
 <li><strong>Composer:</strong> caixa grande de prompt com a toolbar em pílulas (Ratio, Res, Fmt, dry-run) e botões Cancel / Generate. O Ratio tem preview da proporção no ⓘ.</li>
 <li><strong>Status ao vivo:</strong> cronômetro + estado via SSE (<code class="inline">idle, generating, done, cancelled, error</code>) e botão 🔔/🔕 do som.</li>
-<li><strong>Histórico:</strong> tabela do CSV com totais; <strong>clicar numa linha recarrega o prompt</strong> dela (branch de variação sem sobrescrever nada).</li>
+<li><strong>Histórico:</strong> tabela do CSV com totais; <strong>clicar numa linha recarrega o prompt</strong> dela (branch de variação sem sobrescrever nada; o botão direito na linha também tem <em>Use prompt</em>). Como na GUI, <strong>clique no cabeçalho</strong> ordena (▲/▼, a ordem fica salva) e o <strong>botão direito no cabeçalho</strong> abre o filtro estilo planilha (ordenar, <em>Contains…</em>, marcar valores, All/None, Clear filter); ▾ marca colunas filtradas e <em>Clear filters</em> no rodapé limpa tudo.</li>
 <li><strong>Modal de sucesso:</strong> ao receber a imagem, abre um aviso moderno com selo ✓, <strong>som de alerta</strong> (chime sintetizado via Web Audio, sem arquivo), preview, <strong>caminho completo</strong> com botão <em>Copy path</em> e <em>Open full size</em>. Erro toca um tom grave; cancelamento não toca nada.</li>
 <li><strong>Quantidade (×N ao lado do Generate):</strong> naturais 1–30; acima de 1 pede confirmação no navegador destacando o custo adicional.</li>
 </ul>
 <div class="callout"><span class="tag">Por que o som às vezes não toca?</span>Navegadores bloqueiam áudio sem gesto do usuário. O contexto de áudio é criado no clique do Generate — se a aba estiver mutada ou o autoplay bloqueado, o modal aparece normalmente, só sem som.</div>
 
 <h3 id="web-model">Aba Model</h3>
+<p>A web usa o <strong>mesmo <code class="inline">config.json</code></strong> da GUI e salva <strong>mesclando</strong> (só a opção alterada): pastas da Analyse, Chosen dir, ordenação da lista e o <strong>último prompt</strong> são compartilhados entre as duas, e nada que a outra guardou é apagado.</p>
 <p>Provedor, modelo de imagem, modelo de resumo e chave. O status mostra <strong style="color:var(--green)">(configured via vault/env)</strong> em verde ou <strong style="color:var(--red)">(not configured)</strong> em vermelho — mesma informação do backend, só colorida para leitura rápida.</p>
 
 <h3 id="web-dir">Aba Dir + folder picker</h3>
 <p>Cada pasta tem input (digitar/colar) + botão <strong>Browse…</strong>, que abre um modal navegando nas <strong>pastas reais da máquina</strong> (o servidor é local): caminho atual, ⬆ Up, ⌂ Home, lista de subpastas, criar nova pasta e <em>Use this folder</em>. O modal abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe existente mais próxima. Abaixo de cada pasta há o mesmo <strong>Dynamic</strong> da GUI (Start, Range, Batch; habilitado só com quantidade &gt; 1).</p>
 <div class="callout warn"><span class="tag">Limite do navegador</span>O seletor nativo de pastas do browser não entrega o caminho real ao servidor por segurança — por isso o picker navega no servidor via <code class="inline">/api/browse</code> em vez de <code class="inline">&lt;input type=file&gt;</code>.</div>
 
+<h3 id="web-analyse">Aba Analyse</h3>
+<p>A mesma <a href="#gui-analyse">Analyse</a> da GUI: <em>Add folder…</em> (folder picker), pastas como chips com ✕, <em>Order</em> ⇅ (mais novas/mais velhas primeiro, mantendo as escolhas), <em>Clear selection</em>, <em>Refresh</em> e <strong>Zoom −/+</strong>. Clique numa miniatura para escolhê-la na linha (borda verde, uma por linha); duplo clique abre em tamanho real. Parar o mouse sobre uma imagem mostra a <strong>prévia grande</strong> ao lado do cursor. <strong>Choose</strong> copia as escolhidas para <code class="inline">&lt;Chosen dir&gt;/&lt;data_hora&gt;/</code> (vazio = <code class="inline">chosen/</code> na pasta-mãe do Output dir) com <code class="inline">report.md</code> + <code class="inline">report.csv</code>, e o aviso final tem links para os relatórios e <em>Open folder</em>.</p>
+
+<h3 id="web-story">StoryGenerate na web</h3>
+<p>Selecione <strong>StoryGenerate</strong> no topo. As mesmas quatro abas do app desktop (<a href="#story-abas">detalhes</a>):</p>
+<ul>
+<li><strong>Generate:</strong> pastas com Browse…, idioma, Writer, Duration, dry-run, <em>redo existing</em>; <em>Generate stories</em> (pede confirmação quando não é dry-run), <em>Cancel</em>, <em>Retry failed (n)</em>; linha de status <em>generating… x/y done (n failed) | status: passo (N s)</em>. O log tem as mesmas colunas, falhas em vermelho, ordenação/filtro no cabeçalho e o menu do botão direito na linha (<em>Copy row</em>, <em>Open in Player</em>, <em>Open folder</em>, <em>Delete audio only…</em>, <em>Delete script + audio…</em>, <em>Show error</em>, <em>Retry this storyboard</em>); duplo clique abre no Player (ou mostra o erro).</li>
+<li><strong>Model:</strong> Writer model (cadeia com <code class="inline">;</code>), TTS model, chave OpenRouter com <em>remember me</em> / <em>Forget</em> (mesmo cofre).</li>
+<li><strong>Voices:</strong> até 5 voice ids + rótulos e <em>Check voices</em>.</li>
+<li><strong>Player:</strong> lista das histórias, storyboard e roteiro com <strong>divisórias arrastáveis</strong>; na imagem, roda = zoom no ponto do cursor (até 3× o original), arrastar = mover, botão direito = padrão. O áudio toca <strong>no navegador</strong> (com busca), a cena atual fica destacada, clique numa cena pula até ela; mesmos controles e atalhos (<kbd>Espaço</kbd>, <kbd>←</kbd>/<kbd>→</kbd>, <kbd>↑</kbd>/<kbd>↓</kbd>).</li>
+</ul>
+
 <h2 id="story">StoryGenerate (storyboard → história narrada)</h2>
-<p><code class="inline">story_generate.py</code> transforma cada imagem de uma pasta de storyboards numa <strong>história escrita e narrada</strong>. Abra com <code class="inline">python3 story_generate.py --gui</code> (ou pelo launcher). O botão <strong>?</strong> do cabeçalho abre esta seção.</p>
+<p><code class="inline">story_generate.py</code> transforma cada imagem de uma pasta de storyboards numa <strong>história escrita e narrada</strong>. Abra com <code class="inline">python3 story_generate.py --gui</code> (ou pelo launcher) — ou na <a href="#web-story">web</a>. O botão <strong>?</strong> do cabeçalho abre esta seção.</p>
 <ol>
 <li><strong>Roteirista</strong> (modelo de chat <em>com visão</em> no OpenRouter; padrão <code class="inline">google/gemini-3.7-flash</code>): lê os quadros da esquerda para a direita e de cima para baixo, escreve <strong>uma cena por quadro</strong> com transições, dá um título curto e <strong>escolhe a voz</strong> mais adequada entre até 5 vozes do Fish Audio.</li>
 <li><strong>Narração</strong> (Fish Audio <em>via OpenRouter</em>): lê cada cena com a voz escolhida; as cenas viram um único <code class="inline">audio.wav</code> com uma pausa curta entre elas — por isso o player sabe onde cada cena começa.</li>
@@ -344,7 +360,7 @@ python3 image_generate.py --analyse ./A --analyse ./B --choose 1:2 --choose 3:1 
 <tr><td>Generate</td><td>Pasta de storyboards, pasta de saída, idioma, <strong>Writer</strong> (estilo do roteirista), <strong>Duration</strong> (duração alvo), dry-run, <em>redo existing</em>; botões Generate stories / Cancel / <strong>Retry failed (n)</strong>; linha azul de status com o passo atual; lista do log (mais nova primeiro)</td></tr>
 <tr><td>Model</td><td>Writer model (aceita <a href="#story-roteirista">cadeia de fallback</a> com <code class="inline">;</code>), TTS model, chave OpenRouter + remember me / Forget</td></tr>
 <tr><td>Voices</td><td>Até 5 voice ids do Fish Audio + um rótulo opcional (ajuda o roteirista a escolher); <em>Check voices</em> mostra nome, idiomas e tags de cada voz (consulta pública, sem chave)</td></tr>
-<tr><td>Player</td><td>Lista das histórias (mais nova primeiro, cada uma como <em>Título - pasta de storyboards - roteirista</em>, ex. <code class="inline">O Livro Devolvido - muse 1 - Narrativo</code>), storyboard e roteiro lado a lado — as <strong>três partes são redimensionáveis</strong>: arraste as divisórias entre lista, imagem e roteiro e roteiro ao lado com a <strong>cena atual destacada</strong> (clique numa cena para pular até ela). Controles ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; atalhos <kbd>Espaço</kbd>, <kbd>←</kbd>/<kbd>→</kbd> (5 s), <kbd>↑</kbd>/<kbd>↓</kbd> (cena). Usa <code class="inline">aplay</code> (ou <code class="inline">pw-play</code>/<code class="inline">ffplay</code>)</td></tr>
+<tr><td>Player</td><td>Lista das histórias (mais nova primeiro, cada uma como <em>Título - pasta de storyboards - roteirista</em>, ex. <code class="inline">O Livro Devolvido - muse 1 - Narrativo</code>), storyboard e roteiro lado a lado — as <strong>três partes são redimensionáveis</strong>: arraste as divisórias entre lista, imagem e roteiro. Na imagem: <strong>roda do mouse</strong> = zoom no ponto sob o cursor (nítido, até 3× o original), <strong>arrastar</strong> = mover, <strong>botão direito</strong> = volta ao tamanho padrão e centraliza; roteiro ao lado com a <strong>cena atual destacada</strong> (clique numa cena para pular até ela). Controles ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; atalhos <kbd>Espaço</kbd>, <kbd>←</kbd>/<kbd>→</kbd> (5 s), <kbd>↑</kbd>/<kbd>↓</kbd> (cena). Usa <code class="inline">aplay</code> (ou <code class="inline">pw-play</code>/<code class="inline">ffplay</code>)</td></tr>
 </table>
 <p>Configurações (pastas, modelos, idioma, estilo, duração, vozes) ficam em <code class="inline">story_config.json</code>, salvas ao gerar e ao fechar. Os storyboards originais nunca são alterados — só copiados.</p>
 
@@ -495,7 +511,7 @@ python3 story_generate.py --delete "~/Imagens/StoryGenerate/Um dia comum" --audi
 <tr><td><code class="inline">image_generate.py</code></td><td>Núcleo + CLI + GUI (arquivo único)</td></tr>
 <tr><td><code class="inline">story_generate.py</code></td><td>StoryGenerate: CLI + GUI (arquivo único)</td></tr>
 <tr><td><code class="inline">web/server.py</code></td><td>Backend FastAPI</td></tr>
-<tr><td><code class="inline">web/frontend/src/</code></td><td>React: <code class="inline">App.tsx</code>, <code class="inline">api.ts</code>, <code class="inline">tabs/Generate|Model|Dir.tsx</code></td></tr>
+<tr><td><code class="inline">web/frontend/src/</code></td><td>React: <code class="inline">App.tsx</code>, <code class="inline">api.ts</code>, <code class="inline">tabs/Generate|Model|Dir|Analyse|Injection.tsx</code>, <code class="inline">components/DataTable|ContextMenu.tsx</code>, <code class="inline">story/StoryApp|StoryGenerateTab|StoryPlayer.tsx</code></td></tr>
 <tr><td><code class="inline">img/logo.png / img/logo-titulo.png</code></td><td>Marca e arte de fundo (marca d’água na web)</td></tr>
 <tr><td><code class="inline">install.sh</code></td><td>Gera e instala o launcher Linux (o <code class="inline">.desktop</code> é local, ignorado no git)</td></tr>
 <tr><td><code class="inline">docs.html</code></td><td>Esta documentação (arquivo único, sem dependências)</td></tr>
