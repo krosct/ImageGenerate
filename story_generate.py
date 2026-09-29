@@ -2820,22 +2820,161 @@ def run_gui(defaults: dict | None = None) -> None:
                         load_story(folder)
                     break
 
-    def render_image(_event: object = None) -> None:
-        image_canvas.delete("all")
+    # Storyboard view: wheel = zoom at the pointer, drag = move,
+    # right-click = back to the default (fit + centered). Each zoom level is
+    # made sharp from the original by ig.make_thumbnail (cached) in a thread;
+    # the previous level stays on screen meanwhile.
+    view: dict = {"zoom": 1.0, "pan": (0.0, 0.0), "shown": None, "cache": {},
+                  "pending": set(), "generation": 0, "drag": None, "item": None}
+    ZOOM_MIN, ZOOM_STEP, ZOOM_MAX_OF_ORIGINAL = 0.3, 1.2, 3.0
+
+    def view_reset() -> None:
+        view.update(zoom=1.0, pan=(0.0, 0.0), shown=None)
+        view["cache"].clear()
+        view["pending"].clear()
+        view["generation"] += 1
+
+    def fit_scale() -> float:
+        src = state["image_src"]
         width = max(50, image_canvas.winfo_width())
         height = max(50, image_canvas.winfo_height())
+        return min(1.0, width / src.width(), height / src.height())
+
+    def scaled_image(scale: float):
+        """PhotoImage at `scale` of the original: exact via the thumbnail tool
+        (async, returns None until ready), integer fallback otherwise."""
+        src = state["image_src"]
+        longest = max(src.width(), src.height())
+        target = max(40, int(round(longest * scale / 20.0)) * 20)
+        if target in view["cache"]:
+            return view["cache"][target]
+        if abs(scale - 1.0) < 1e-6:
+            return src
+        path = state.get("image_path")
+        if path is not None and (shutil.which("convert") or shutil.which("ffmpeg")):
+            generation = view["generation"]
+
+            def work() -> None:
+                thumb = ig.make_thumbnail(path, target)
+                root.after(0, lambda: loaded(thumb))
+
+            def loaded(thumb: Path | None) -> None:
+                if generation != view["generation"]:
+                    return
+                view["pending"].discard(target)
+                if thumb is None:
+                    return
+                try:
+                    image = tk.PhotoImage(file=str(thumb))
+                except tk.TclError:
+                    return
+                if len(view["cache"]) >= 6:
+                    view["cache"].pop(next(iter(view["cache"])))
+                view["cache"][target] = image
+                draw()
+
+            if target not in view["pending"]:
+                view["pending"].add(target)
+                threading.Thread(target=work, daemon=True).start()
+            return None
+        if scale < 1:  # no tool: integer subsample / zoom of the original
+            factor = max(1, round(1 / scale))
+            image = src.subsample(factor, factor)
+        else:
+            image = src.zoom(max(1, round(scale)))
+        view["cache"][target] = image
+        return image
+
+    def draw() -> None:
         src = state["image_src"]
         if src is None:
+            return
+        width = max(50, image_canvas.winfo_width())
+        height = max(50, image_canvas.winfo_height())
+        scale = fit_scale() * view["zoom"]
+        image = scaled_image(scale)
+        if image is None:  # sharp version still being made: keep the last one
+            image = view["shown"] or src.subsample(
+                max(1, math.ceil(max(src.width() / width, src.height() / height))))
+        view["shown"] = image
+        state["image"] = image
+        x = width / 2 + view["pan"][0]
+        y = height / 2 + view["pan"][1]
+        if view["item"] is None or not image_canvas.find_withtag(view["item"]):
+            image_canvas.delete("all")
+            view["item"] = image_canvas.create_image(x, y, image=image)
+            text = image_canvas.create_text(10, height - 8, anchor=tk.SW, fill="#bbb",
+                                            text="scroll = zoom · drag = move · "
+                                                 "right-click = reset", tags=("hint_text",))
+            x0, y0, x1, y1 = image_canvas.bbox(text)
+            image_canvas.create_rectangle(x0 - 4, y0 - 2, x1 + 4, y1 + 2, fill="#111",
+                                          outline="", tags=("hint_box",))
+            image_canvas.tag_raise("hint_text")  # readable over a zoomed light image
+        else:
+            image_canvas.itemconfigure(view["item"], image=image)
+            image_canvas.coords(view["item"], x, y)
+            image_canvas.tag_raise("hint_box")
+            image_canvas.tag_raise("hint_text")
+
+    def render_image(_event: object = None) -> None:
+        image_canvas.delete("all")
+        view["item"] = None
+        width = max(50, image_canvas.winfo_width())
+        height = max(50, image_canvas.winfo_height())
+        if state["image_src"] is None:
             if state["story"] is not None:
                 image_canvas.create_text(width // 2, height // 2, fill="#ddd",
                                          text="Storyboard preview unavailable\n"
                                               "(use Open folder)", justify=tk.CENTER)
             return
-        factor = max(1, math.ceil(max(src.width() / width, src.height() / height)))
-        state["image"] = src.subsample(factor, factor) if factor > 1 else src
-        image_canvas.create_image(width // 2, height // 2, image=state["image"])
+        draw()
+
+    def on_image_wheel(event: object) -> None:
+        if state["image_src"] is None:
+            return
+        num, delta = getattr(event, "num", 0), getattr(event, "delta", 0)
+        step = ZOOM_STEP if (num == 4 or delta > 0) else 1 / ZOOM_STEP
+        fit = fit_scale()
+        max_zoom = ZOOM_MAX_OF_ORIGINAL / fit if fit else ZOOM_MAX_OF_ORIGINAL
+        old = view["zoom"]
+        new = min(max(old * step, ZOOM_MIN), max_zoom)
+        if abs(new - old) < 1e-9:
+            return
+        # keep the point under the pointer still: pan' = c - (c - pan) * new/old
+        cx = event.x - image_canvas.winfo_width() / 2  # type: ignore[attr-defined]
+        cy = event.y - image_canvas.winfo_height() / 2  # type: ignore[attr-defined]
+        px, py = view["pan"]
+        ratio = new / old
+        view["pan"] = (cx - (cx - px) * ratio, cy - (cy - py) * ratio)
+        view["zoom"] = new
+        draw()
+
+    def on_image_press(event: object) -> None:
+        view["drag"] = (event.x, event.y, view["pan"])  # type: ignore[attr-defined]
+        image_canvas.configure(cursor="fleur")
+
+    def on_image_drag(event: object) -> None:
+        if view["drag"] is None or state["image_src"] is None:
+            return
+        x0, y0, (px, py) = view["drag"]
+        view["pan"] = (px + event.x - x0, py + event.y - y0)  # type: ignore[attr-defined]
+        draw()
+
+    def on_image_release(_event: object) -> None:
+        view["drag"] = None
+        image_canvas.configure(cursor="")
+
+    def on_image_reset(_event: object = None) -> None:
+        view.update(zoom=1.0, pan=(0.0, 0.0))
+        draw()
 
     image_canvas.bind("<Configure>", render_image)
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        image_canvas.bind(seq, on_image_wheel)
+    image_canvas.bind("<ButtonPress-1>", on_image_press)
+    image_canvas.bind("<B1-Motion>", on_image_drag)
+    image_canvas.bind("<ButtonRelease-1>", on_image_release)
+    image_canvas.bind("<Button-3>", on_image_reset)
 
     def load_story(folder: Path) -> None:
         stop_play(release=True)
@@ -2845,6 +2984,8 @@ def run_gui(defaults: dict | None = None) -> None:
             return
         state["story"], state["folder"], state["shown_scene"] = meta, folder, -1
         image_path = find_storyboard_image(folder, meta)
+        state["image_path"] = image_path
+        view_reset()
         try:
             state["image_src"] = tk.PhotoImage(file=str(image_path)) if image_path else None
         except tk.TclError:
