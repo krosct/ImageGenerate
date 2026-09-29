@@ -2082,6 +2082,9 @@ def run_gui(defaults: dict | None = None) -> None:
                     font=("TkDefaultFont", 10), padding=6)
     style.map("Cancel.TButton", background=[("active", "#f8a8a0"), ("disabled", "#f5ccc8")])
     style.configure("Player.TButton", font=("TkDefaultFont", 12), padding=4)
+    style.configure("Help.TButton", background="#8ab4f8", foreground="#052e16",
+                    font=("TkDefaultFont", 10, "bold"), padding=4)
+    style.map("Help.TButton", background=[("active", "#b0c8f5"), ("disabled", "#c8d8f5")])
 
     state: dict = {"running": False, "start": 0.0, "after_id": None, "cancel_event": None,
                    "logo_img": None, "player": None, "story": None, "folder": None,
@@ -2102,6 +2105,19 @@ def run_gui(defaults: dict | None = None) -> None:
     except (tk.TclError, OSError):
         state["logo_img"] = None
     ttk.Label(header, text="StoryGenerate", font=("", 14, "bold")).pack(side=tk.LEFT)
+
+    def open_docs() -> None:
+        """Open docs.html (repo root) at the StoryGenerate section."""
+        import webbrowser
+
+        docs = Path(__file__).resolve().parent / "docs.html"
+        if docs.is_file():
+            webbrowser.open(docs.as_uri() + "#story")
+        else:
+            messagebox.showwarning("Docs", f"docs.html not found:\n{docs}")
+
+    help_btn = ttk.Button(header, text="?", width=3, command=open_docs, style="Help.TButton")
+    help_btn.pack(side=tk.RIGHT)
 
     def attach_help(widget: object, text: str) -> None:
         tip: dict = {"window": None}
@@ -2128,6 +2144,8 @@ def run_gui(defaults: dict | None = None) -> None:
 
         widget.bind("<Enter>", show)  # type: ignore[attr-defined]
         widget.bind("<Leave>", hide)  # type: ignore[attr-defined]
+
+    attach_help(help_btn, "Open the documentation (docs.html) at the StoryGenerate section.")
 
     def pick_dir(var: tk.StringVar) -> None:
         typed = var.get().strip()
