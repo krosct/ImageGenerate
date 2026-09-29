@@ -125,7 +125,8 @@ python3 image_generate.py --list-log
 - falhas ficam **em vermelho** com o motivo: **Retry failed** refaz só elas (ou duplo clique / botão direito numa linha vermelha);
 - botão direito: *Copy row*, *Open in Player*, *Open folder*, *Delete audio only…*, *Delete script + audio…* (para a Lixeira; o storyboard original nunca é tocado);
 - texto grande aparece inteiro num balão ao parar o mouse na célula;
-- storyboards já transformados são pulados (mesmo conteúdo de imagem) para não gastar de novo; *redo existing* refaz.
+- storyboards já transformados **no estilo selecionado** são pulados (mesmo conteúdo de imagem) para não gastar de novo — ter a versão Descritiva não impede gerar a Narrativa; *redo existing* refaz todos;
+- a coluna *storyboards dir* mostra de qual pasta veio cada história.
 
 **Aba Player:** mostra o storyboard com o roteiro ao lado e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓).
 

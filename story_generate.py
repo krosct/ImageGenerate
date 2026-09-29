@@ -1155,9 +1155,20 @@ def list_stories(output_dir: str | Path) -> list[tuple[Path, dict]]:
     return sorted(stories, key=lambda item: str(item[1].get("created", "")), reverse=True)
 
 
-def find_existing_story(output_dir: str | Path, sha256: str) -> Path | None:
+def story_style(meta: dict) -> str:
+    """Writer style of a story/log row; stories made before styles existed
+    were all written the descriptive way."""
+    style = str(meta.get("style") or DEFAULT_STYLE)
+    return style if style in WRITER_STYLES else DEFAULT_STYLE
+
+
+def find_existing_story(output_dir: str | Path, sha256: str,
+                        style: str | None = None) -> Path | None:
+    """Story already made from this image (same SHA-256) - with the same writer
+    style when style is given, so a storyboard done in one style can still be
+    written in the other."""
     for folder, meta in list_stories(output_dir):
-        if meta.get("source_sha256") == sha256:
+        if meta.get("source_sha256") == sha256 and (style is None or story_style(meta) == style):
             return folder
     return None
 
@@ -1305,21 +1316,23 @@ def backfill_free_costs(output_dir: str | Path) -> int:
     return fixed
 
 
-def failed_storyboards(output_dir: str | Path) -> list[Path]:
-    """Storyboards whose LAST log row is an error and that still have no story
-    (and still exist on disk) - what "Retry failed" / --retry-failed redo."""
+def failed_storyboards(output_dir: str | Path, style: str | None = None) -> list[Path]:
+    """Storyboards whose LAST attempt (per writer style) is an error and that
+    still have no story in that style (and still exist on disk) - what
+    "Retry failed" / --retry-failed redo. style limits it to one style."""
     out = Path(output_dir).expanduser()
-    last: dict[str, str] = {}
+    last: dict[tuple[str, str], str] = {}
     for row in read_log_rows(out / LOG_FILENAME):
         if row.get("source_image"):
-            last[row["source_image"]] = row.get("status") or "ok"
-    done = {meta.get("source_sha256") for _f, meta in list_stories(out)}
-    failed = []
-    for source, state in last.items():
+            last[(row["source_image"], story_style(row))] = row.get("status") or "ok"
+    done = {(meta.get("source_sha256"), story_style(meta)) for _f, meta in list_stories(out)}
+    failed: dict[str, Path] = {}
+    for (source, row_style), state in last.items():
         path = Path(source)
-        if state == "error" and path.is_file() and file_sha256(path) not in done:
-            failed.append(path)
-    return sorted(failed, key=lambda p: p.name.casefold())
+        if (state == "error" and (style is None or row_style == style) and path.is_file()
+                and (file_sha256(path), row_style) not in done):
+            failed[source] = path
+    return sorted(failed.values(), key=lambda p: p.name.casefold())
 
 
 def generate_story(
@@ -1355,9 +1368,10 @@ def generate_story(
     out.mkdir(parents=True, exist_ok=True)
     sha = file_sha256(source)
     if not force:
-        existing = find_existing_story(out, sha)
+        existing = find_existing_story(out, sha, style)
         if existing is not None:
             return {"skipped": True, "folder": str(existing), "source": str(source),
+                    "style": style,
                     "title": (load_story_meta(existing) or {}).get("title", existing.name)}
 
     def check_cancel() -> None:
@@ -1991,9 +2005,9 @@ def main_cli(args: argparse.Namespace) -> int:
         return 0
     try:
         if args.retry_failed:
-            images = failed_storyboards(settings["output_dir"])
+            images = failed_storyboards(settings["output_dir"], settings["style"])
             if not images:
-                print(f"nothing to retry: no failed storyboard in "
+                print(f"nothing to retry: no failed {settings['style']} storyboard in "
                       f"{Path(settings['output_dir']) / LOG_FILENAME}")
                 return 0
         elif args.image:
@@ -2027,7 +2041,8 @@ def main_cli(args: argparse.Namespace) -> int:
         if result is None:
             print(f"[{info['done']}/{info['total']}] error: {info['errors'][-1]['error']}")
         elif result.get("skipped"):
-            print(f"[{info['done']}/{info['total']}] skipped (already done): {result['folder']}")
+            print(f"[{info['done']}/{info['total']}] skipped (already done as "
+                  f"{result.get('style') or DEFAULT_STYLE}): {result['folder']}")
         else:
             print(f"[{info['done']}/{info['total']}] {result['title']} -> {result['folder']}")
 
@@ -2250,19 +2265,22 @@ def run_gui(defaults: dict | None = None) -> None:
                                padding=6)
     log_frame.grid(row=5, column=0, columnspan=3, sticky=tk.NSEW, pady=(6, 0))
     tab_generate.rowconfigure(5, weight=1)
-    columns = ("status", "date", "title", "style", "scenes", "voice_label", "audio_seconds",
-               "target_seconds", "writer_cost_usd", "tts_cost_usd", "detail")
+    columns = ("status", "date", "title", "storyboard_dir", "style", "scenes", "voice_label",
+               "audio_seconds", "target_seconds", "writer_cost_usd", "tts_cost_usd", "detail")
     headings = {"status": "status", "date": "date", "title": "title / storyboard",
-                "style": "writer", "scenes": "scenes", "voice_label": "voice",
+                "storyboard_dir": "storyboards dir", "style": "writer", "scenes": "scenes",
+                "voice_label": "voice",
                 "audio_seconds": "audio s", "target_seconds": "target s",
                 "writer_cost_usd": "writer $", "tts_cost_usd": "narration $",
                 "detail": "folder / error"}
-    widths = {"status": 62, "date": 108, "title": 170, "style": 82, "scenes": 48,
+    widths = {"status": 62, "date": 108, "title": 170, "storyboard_dir": 160, "style": 82,
+              "scenes": 48,
               "voice_label": 105, "audio_seconds": 55, "target_seconds": 58,
               "writer_cost_usd": 68, "tts_cost_usd": 80, "detail": 250}
     # Treeview cells are single-line: columns auto-fit their content (with a
     # horizontal scrollbar); right-click -> "Copy row" copies a row in full.
-    max_widths = {"title": 320, "voice_label": 200, "detail": 1400 // 3}  # full text: tooltip / Copy row
+    max_widths = {"title": 320, "storyboard_dir": 260, "voice_label": 200,
+                  "detail": 1400 // 3}  # full text: tooltip / Copy row
     tree_frame = ttk.Frame(log_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
     tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=10)
@@ -2297,12 +2315,26 @@ def run_gui(defaults: dict | None = None) -> None:
     def current_out_dir() -> Path:
         return Path(out_var.get().strip() or default_output_dir()).expanduser()
 
+    def storyboard_dir_label(source: str) -> str:
+        """Folder of the storyboard (from source_image, already in every log row):
+        its name first - what tells folders apart - then where it is, with the
+        home folder as ~ (a narrow column cuts the less useful end)."""
+        if not source:
+            return ""
+        folder = Path(source).parent
+        parent, home = str(folder.parent), str(Path.home())
+        if parent == home or parent.startswith(home + os.sep):
+            parent = "~" + parent[len(home):]
+        return f"{folder.name}  ({parent})"
+
     def row_details(row: dict) -> str:
         """A log row as readable "Label: value" lines (what "Copy row" copies)."""
         if row.get("status") == "error":
             pairs = [("Status", "error"),
                      ("Error", row.get("error") or "(no detail)"),
                      ("Storyboard", row.get("source_image", "")),
+                     ("Storyboards dir", str(Path(row["source_image"]).parent)
+                      if row.get("source_image") else ""),
                      ("When", (row.get("date") or "").replace("T", " ")[:19]),
                      ("Writer", f"{row.get('writer_model')} ({row.get('style') or DEFAULT_STYLE})"),
                      ("Narrator", row.get("tts_model", "")),
@@ -2314,6 +2346,8 @@ def run_gui(defaults: dict | None = None) -> None:
                      ("Title", row.get("title", "")),
                      ("Folder", str(current_out_dir() / row.get("folder", ""))),
                      ("Storyboard", row.get("source_image", "")),
+                     ("Storyboards dir", str(Path(row["source_image"]).parent)
+                      if row.get("source_image") else ""),
                      ("When", (row.get("date") or "").replace("T", " ")[:19]),
                      ("Writer", f"{row.get('writer_model')} ({row.get('style') or DEFAULT_STYLE}"
                                 + (f", thinking {row['writer_effort']}" if row.get("writer_effort")
@@ -2339,7 +2373,8 @@ def run_gui(defaults: dict | None = None) -> None:
         log_path = current_out_dir() / LOG_FILENAME
         rows = list(reversed(read_log_rows(log_path)))
         total = 0.0
-        failed_now = {str(p) for p in failed_storyboards(current_out_dir())}
+        failed_now = {str(p) for p in failed_storyboards(current_out_dir(),
+                                                          style_from_label(style_var.get()))}
         for row in rows:
             total += row_cost(row)
             failed = row.get("status") == "error"
@@ -2353,6 +2388,8 @@ def run_gui(defaults: dict | None = None) -> None:
                     values.append((row.get("date") or "")[5:16].replace("T", " "))
                 elif col == "title":
                     values.append(row.get("title") or Path(row.get("source_image", "")).name)
+                elif col == "storyboard_dir":
+                    values.append(storyboard_dir_label(row.get("source_image", "")))
                 elif col == "style":
                     values.append(row.get("style") or DEFAULT_STYLE)
                 elif col == "detail":
@@ -2383,8 +2420,9 @@ def run_gui(defaults: dict | None = None) -> None:
         if messagebox.askyesno(
                 "Storyboard failed",
                 f"{source.name}\n{row.get('date', '')[:19]}  writer {row.get('writer_model')}\n\n"
-                f"{row.get('error') or '(no detail)'}\n\nRetry this storyboard now?"):
-            start_batch([source], retry=True)
+                f"{row.get('error') or '(no detail)'}\n\nRetry this storyboard now "
+                f"({style_label(story_style(row))})?"):
+            start_batch([source], retry=True, style=story_style(row))
 
     def on_row_double_click(_event: object = None) -> None:
         hide_cell_tip()
@@ -2413,7 +2451,8 @@ def run_gui(defaults: dict | None = None) -> None:
             row_menu.add_command(label="Show error", command=lambda: show_failure(row))
             row_menu.add_command(label="Retry this storyboard",
                                  command=lambda: start_batch([Path(row["source_image"])],
-                                                             retry=True))
+                                                             retry=True,
+                                                             style=story_style(row)))
         elif row.get("status") == "deleted":
             row_menu.add_command(label="(production deleted)", state=tk.DISABLED)
         else:
@@ -2975,8 +3014,10 @@ def run_gui(defaults: dict | None = None) -> None:
         else:
             root.after(0, lambda: on_done(batch, None))
 
-    def start_batch(images: list[Path], retry: bool = False) -> None:
-        """Validate the settings, confirm the cost and run the batch in a thread."""
+    def start_batch(images: list[Path], retry: bool = False, style: str | None = None) -> None:
+        """Validate the settings, confirm the cost and run the batch in a thread.
+        style overrides the Writer dropdown (retrying a row keeps its style)."""
+        style = style or style_from_label(style_var.get())
         if state["running"] or not images:
             return
         dry_run = bool(dry_var.get())
@@ -3000,7 +3041,7 @@ def run_gui(defaults: dict | None = None) -> None:
         what = (f"Retry {len(images)} failed storyboard(s)" if retry
                 else f"Write and narrate {len(images)} storyboard(s)")
         if not dry_run and not messagebox.askyesno(
-                "Confirm", f"{what}?\n\nWriter: {style_var.get()}, duration "
+                "Confirm", f"{what}?\n\nWriter: {style_label(style)}, duration "
                            f"{format_clock(target_s) if target_s else 'automatic'}.\n"
                            "Each story costs one writer call plus the narration "
                            f"({tts_var.get()}), both on OpenRouter. Storyboards already done are "
@@ -3018,7 +3059,7 @@ def run_gui(defaults: dict | None = None) -> None:
             "writer_model": writer_var.get().strip() or WRITER_DEFAULT_MODEL,
             "tts_model": tts_var.get().strip() or DEFAULT_TTS_MODEL,
             "language": lang_var.get().strip() or DEFAULT_LANGUAGE,
-            "style": style_from_label(style_var.get()),
+            "style": style,
             "target_s": target_s,
             "openrouter_key": or_typed or resolve_openrouter_key()[0],
             "force": bool(force_var.get()) and not retry,
@@ -3044,9 +3085,10 @@ def run_gui(defaults: dict | None = None) -> None:
         start_batch(images)
 
     def on_retry_failed() -> None:
-        failed = failed_storyboards(current_out_dir())
+        failed = failed_storyboards(current_out_dir(), style_from_label(style_var.get()))
         if not failed:
-            messagebox.showinfo("Retry failed", "No failed storyboard left to retry.")
+            messagebox.showinfo("Retry failed", f"No failed storyboard left to retry in "
+                                                f"{style_var.get()}.")
             refresh_log()
             return
         start_batch(failed, retry=True)
@@ -3059,6 +3101,8 @@ def run_gui(defaults: dict | None = None) -> None:
             status_var.set("cancelling... (aborting requests)")
 
     retry_btn.configure(command=on_retry_failed)
+    # "Retry failed (n)" counts the failures of the selected writer style
+    style_var.trace_add("write", lambda *_a: refresh_log())
     gen_btn.configure(command=on_generate)
     cancel_btn.configure(command=on_cancel)
     refresh_log()

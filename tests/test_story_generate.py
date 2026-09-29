@@ -929,11 +929,51 @@ class ControlsTest(IsolatedMixin):
         self.assertIn("blocked by filter", errors[0]["error"])
         self.assertEqual(errors[0]["style"], "connective")
         self.assertEqual(sg.failed_storyboards(out), [bad])
-        # retry succeeds -> no longer listed as failed (history row stays)
+        self.assertEqual(sg.failed_storyboards(out, "connective"), [bad])
+        self.assertEqual(sg.failed_storyboards(out, "descriptive"), [])
+        # a descriptive story does not fix the connective failure...
         self.run_dry(bad)
+        self.assertEqual(sg.failed_storyboards(out, "connective"), [bad])
+        # ...retrying in the failed style does (history row stays)
+        self.run_dry(bad, style="connective")
         self.assertEqual(sg.failed_storyboards(out), [])
         self.assertEqual(len([r for r in sg.read_log_rows(out / sg.LOG_FILENAME)
                               if r["status"] == "error"]), 1)
+
+    def test_skip_is_per_writer_style(self):
+        image = self.storyboard()
+        first = self.run_dry(image)                       # descriptive
+        self.assertTrue(self.run_dry(image)["skipped"])   # same style -> skipped
+        narrative = self.run_dry(image, style="connective")
+        self.assertFalse(narrative["skipped"])            # other style -> written
+        self.assertNotEqual(narrative["folder"], first["folder"])
+        again = self.run_dry(image, style="connective")
+        self.assertTrue(again["skipped"])
+        self.assertEqual((again["folder"], again["style"]), (narrative["folder"], "connective"))
+
+    def test_stories_without_style_count_as_descriptive(self):
+        image = self.storyboard()
+        folder = Path(self.run_dry(image)["folder"])
+        meta = sg.load_story_meta(folder)
+        meta.pop("style")                                 # made before styles existed
+        (folder / sg.STORY_JSON).write_text(json.dumps(meta))
+        self.assertTrue(self.run_dry(image)["skipped"])
+        self.assertFalse(self.run_dry(image, style="connective")["skipped"])
+        self.assertEqual(sg.story_style({}), "descriptive")
+        self.assertEqual(sg.story_style({"style": "weird"}), "descriptive")
+
+    def test_cli_skips_per_style(self):
+        self.storyboard("a.png")
+        base = ["--input-dir", str(self.tmp / "in"), "--output-dir", str(self.tmp / "out"),
+                "--dry-run"]
+        with redirect_stdout(io.StringIO()):
+            sg.main(base)
+        with redirect_stdout(io.StringIO()) as out:
+            sg.main(base + ["--style", "connective"])
+        self.assertIn("1 created, 0 skipped", out.getvalue())
+        with redirect_stdout(io.StringIO()) as out:
+            sg.main(base + ["--style", "connective"])
+        self.assertIn("skipped (already done as connective)", out.getvalue())
 
     def test_failed_storyboard_deleted_is_not_listed(self):
         bad = self.storyboard("gone.png")
