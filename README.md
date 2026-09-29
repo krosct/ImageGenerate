@@ -10,10 +10,12 @@ E transforme storyboards em histórias narradas com o **StoryGenerate** 🎙️
 - **Gera imagens a partir de imagens** — use referências visuais (`--memory-dir`) para manter estilo/personagem.
 - **Gera imagens em loop** — `--count 3` (até 30) com o mesmo prompt; acima de 10, o pedido é dividido em chamadas de até 10 imagens automaticamente.
 - **Pastas dinâmicas (Dynamic)** — com n > 1, marque *Dynamic* abaixo de Output/Context/Memory dir e informe *Start* (padrão 1), *Range* (última pasta) e *Batch* (gerações por pasta, padrão 1): as gerações usam `<pasta>/<Start>` … `<pasta>/<Range>`, *Batch* seguidas em cada pasta, e voltam ao Start. Ex.: Start 2, Range 12, Batch 3 → gerações 1–3 na pasta 2, 4–6 na 3, 7–9 na 4… CLI: `--dynamic-output 12 --dynamic-output-start 2 --dynamic-output-batch 3`.
-- **Comparar e escolher (Analyse)** — aba que mostra várias pastas lado a lado (linha N = N-ésima imagem mais recente de cada pasta, ⇅ inverte, Zoom −/+, prévia grande ao parar o mouse sobre a imagem), você seleciona 1 imagem por linha e **Choose** copia as escolhidas para `chosen/<data_hora>/` com relatório (`report.md` + `report.csv`: origem, prompt, modelo, seed e contra quais imagens cada uma venceu). CLI: `--analyse A --analyse B --choose 1:2`.
+- **Comparar e escolher (Analyse)** — aba que mostra várias pastas lado a lado (linha N = N-ésima imagem mais recente de cada pasta, ⇅ inverte, Zoom −/+, prévia grande ao parar o mouse sobre a imagem — o maior tamanho que cabe ao lado do cursor), você seleciona 1 imagem por linha e **Choose** copia as escolhidas para `chosen/<data_hora>/` (por padrão na pasta-mãe do Output dir, ao lado das pastas comparadas) com relatório (`report.md` + `report.csv`: origem, prompt, modelo, seed e contra quais imagens cada uma venceu). CLI: `--analyse A --analyse B --choose 1:2`.
 - **Variáveis no prompt (Injection)** — use `{{nome}}` no prompt e preencha os valores por geração: aba amarela **Injection** na GUI/web ou `--inject 'pessoa=menino,objeto=sorvete'` no CLI (uma opção por geração).
 - **Escolhe modelo, proporção, resolução, formato** — `provider/model`, `1:1` a `21:9`, `512` a `4K`, `png`/`jpeg`/`webp`.
 - **Salva log das requisições** — `log_image_generate.csv`, mostrado da mais nova para a mais velha e atualizado a cada imagem (botão direito → *Use prompt*).
+- **Ordenar e filtrar a lista (nas duas GUIs)** — clique no cabeçalho para ordenar; botão direito no cabeçalho abre um filtro estilo planilha (valores com contagem, “contém…”). CLI: `--list-log --log-filter model=muse --log-sort cost_usd:desc`.
+- **Lembra de tudo** — pastas, modelos, opções e o **último prompt** voltam ao reabrir a GUI.
 - **Browse inteligente** — abre na pasta digitada; se ela não existir, avisa e abre na pasta-mãe mais próxima.
 - **Teste offline** — `--dry-run` escreve placeholder sem chave, sem gasto.
 - **Três interfaces, um núcleo** — CLI, GUI (Tkinter) e Web (React + FastAPI) usam o core.
@@ -125,10 +127,11 @@ python3 image_generate.py --list-log
 - falhas ficam **em vermelho** com o motivo: **Retry failed** refaz só elas (ou duplo clique / botão direito numa linha vermelha);
 - botão direito: *Copy row*, *Open in Player*, *Open folder*, *Delete audio only…*, *Delete script + audio…* (para a Lixeira; o storyboard original nunca é tocado);
 - texto grande aparece inteiro num balão ao parar o mouse na célula;
+- ordene clicando no cabeçalho e filtre com o botão direito no cabeçalho (ex.: só *error*, só *muse 1*, só *Narrativo*); CLI: `--list-log --log-filter style=connective`;
 - storyboards já transformados **no estilo selecionado** são pulados (mesmo conteúdo de imagem) para não gastar de novo — ter a versão Descritiva não impede gerar a Narrativa; *redo existing* refaz todos;
 - a coluna *storyboards dir* mostra de qual pasta veio cada história.
 
-**Aba Player:** mostra o storyboard com o roteiro ao lado e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓).
+**Aba Player:** a lista mostra cada história como *Título - pasta de storyboards - roteirista* (ex.: `O Livro Devolvido - muse 1 - Narrativo`); o player mostra o storyboard com o roteiro ao lado (arraste as divisórias para redimensionar lista, imagem e roteiro) e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓).
 
 ```bash
 python3 story_generate.py --gui
