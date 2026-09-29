@@ -1267,7 +1267,9 @@ def speech_rates(output_dir: str | Path) -> dict[str, float]:
     return rates
 
 
-_COST_THREADS: list[threading.Thread] = []
+# cost-fill threads per starting thread: a batch only waits for its own
+# lookups (the web server runs several batches in one process)
+_COST_THREADS: dict[int, list[threading.Thread]] = {}
 
 
 def _fill_cost_later(folder: Path, log_path: Path, ids: list[str], api_key: str | None) -> None:
@@ -1288,13 +1290,13 @@ def start_cost_fill(folder: Path, log_path: Path, ids: list[str], api_key: str |
     thread = threading.Thread(target=_fill_cost_later, args=(folder, log_path, ids, api_key),
                               daemon=True)
     thread.start()
-    _COST_THREADS.append(thread)
+    _COST_THREADS.setdefault(threading.get_ident(), []).append(thread)
 
 
 def wait_cost_fills(timeout_s: float = COST_FILL_DEADLINE_S) -> None:
+    """Wait for the cost fills started by the calling thread."""
     deadline = time.monotonic() + timeout_s
-    while _COST_THREADS:
-        thread = _COST_THREADS.pop(0)
+    for thread in _COST_THREADS.pop(threading.get_ident(), []):
         thread.join(max(0.0, deadline - time.monotonic()))
 
 
@@ -1548,7 +1550,7 @@ def run_story_batch(
         if on_progress is not None:
             on_progress({"done": index + 1, "total": len(images), "result": result,
                          "errors": list(errors)})
-    if _COST_THREADS:
+    if _COST_THREADS.get(threading.get_ident()):
         _say(on_status, "stories saved - waiting for the narration cost from OpenRouter...")
         wait_cost_fills()
     for result in results:

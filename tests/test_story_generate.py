@@ -362,6 +362,22 @@ class AudioTest(IsolatedMixin):
         with mock.patch.object(ig, "_fetch_json", return_value=(404, "")):
             self.assertIsNone(sg.lookup_generation_cost(["g1"], "k", cancel, poll_s=5))
 
+    def test_wait_cost_fills_only_waits_for_own_batch(self):
+        release = threading.Event()
+        with mock.patch.object(sg, "_fill_cost_later", side_effect=lambda *a: release.wait(5)):
+            # another batch (another thread, like a second web job) is still waiting
+            other = threading.Thread(target=sg.start_cost_fill, args=(Path("."), Path("x"), ["g"], "k"))
+            other.start()
+            other.join()
+            started = time.monotonic()
+            sg.wait_cost_fills(timeout_s=5)
+            self.assertLess(time.monotonic() - started, 1.0)
+            sg.start_cost_fill(Path("."), Path("x"), ["g"], "k")
+            release.set()
+            sg.wait_cost_fills(timeout_s=5)  # its own fill: joined
+        self.assertFalse(sg._COST_THREADS.get(threading.get_ident()))
+        sg._COST_THREADS.clear()
+
     def test_scene_at_and_clock(self):
         scenes = [{"start": 0.0}, {"start": 3.0}, {"start": 7.5}]
         self.assertEqual([sg.scene_at(scenes, t) for t in (0, 2.9, 3.0, 7.0, 99)],
@@ -451,9 +467,11 @@ class PipelineTest(IsolatedMixin):
 
         with mock.patch.object(ig, "_post_json",
                                return_value=(200, _chat_payload(_story_json(VOICE_B)))), \
-                mock.patch.object(sg, "synthesize", side_effect=fake_tts):
+                mock.patch.object(sg, "synthesize", side_effect=fake_tts), \
+                mock.patch.object(sg, "start_cost_fill") as fill:  # no real network
             result = sg.generate_story(image, output_dir=str(self.tmp / "out"), voices=voices,
                                        openrouter_key="k", tts_model="fish-audio/s1")
+        self.assertEqual(fill.call_args[0][2], ["gen-1", "gen-2", "gen-3"])
         self.assertEqual(Path(result["folder"]).name, "Um dia comum")
         self.assertEqual([t[1] for t in texts], [VOICE_B] * 3)
         self.assertEqual({t[3] for t in texts}, {"k"})  # same OpenRouter key as the writer
