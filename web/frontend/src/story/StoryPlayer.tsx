@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, StoryInfo } from '../api'
 
-// Web twin of the desktop StoryGenerate "Player" tab: story list | storyboard
-// (zoom at the pointer, drag to pan, right-click resets) | script (current
-// scene highlighted, click to seek) + transport controls and shortcuts.
+// Web twin of the desktop StoryGenerate "Player" tab.
+// Layout: story list (narrow, resizable) | storyboard stage (zoom at the
+// pointer, drag to pan, right-click resets) with the transport controls right
+// under it; the script sits full width below the image — title, subtitle,
+// a horizontal row of scene cards (current scene highlighted, click to seek)
+// and the voice line.
 interface Props {
   outputDir: string
   selected: string
@@ -26,6 +29,7 @@ function sceneAt(scenes: StoryInfo['scenes'], pos: number): number {
 
 // same limit as the desktop Player: up to 3x the original image pixels
 const MIN_ZOOM = 1, MAX_ORIGINAL = 3
+const LIST_DEFAULT = 133, LIST_MIN = 110
 
 export default function StoryPlayer(p: Props) {
   const [stories, setStories] = useState<StoryInfo[]>([])
@@ -33,7 +37,7 @@ export default function StoryPlayer(p: Props) {
   const [duration, setDuration] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [seeking, setSeeking] = useState<number | null>(null)
-  const [widths, setWidths] = useState<[number, number]>([280, 380])
+  const [listWidth, setListWidth] = useState(LIST_DEFAULT)
   const [view, setView] = useState({ zoom: 1, x: 0, y: 0 })
   const audio = useRef<HTMLAudioElement>(null)
   const stage = useRef<HTMLDivElement>(null)
@@ -64,7 +68,8 @@ export default function StoryPlayer(p: Props) {
   }, [story?.folder, story?.audio_seconds])
 
   useEffect(() => {
-    scriptBox.current?.querySelector('.scene-current')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    scriptBox.current?.querySelector('.scene-current')
+      ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' })
   }, [current])
 
   function seek(seconds: number) {
@@ -156,16 +161,11 @@ export default function StoryPlayer(p: Props) {
     window.addEventListener('mouseup', up)
   }
 
-  // ---- draggable dividers between list | image | script ----
-  function startResize(which: 0 | 1, e: React.MouseEvent) {
+  // ---- draggable divider between the story list and the storyboard ----
+  function startResize(e: React.MouseEvent) {
     e.preventDefault()
-    const startX = e.clientX, start = widths
-    const move = (ev: MouseEvent) => {
-      const dx = ev.clientX - startX
-      setWidths(which === 0
-        ? [Math.max(160, start[0] + dx), start[1]]
-        : [start[0], Math.max(200, start[1] - dx)])
-    }
+    const startX = e.clientX, start = listWidth
+    const move = (ev: MouseEvent) => setListWidth(Math.max(LIST_MIN, start + ev.clientX - startX))
     const up = () => {
       window.removeEventListener('mousemove', move)
       window.removeEventListener('mouseup', up)
@@ -181,7 +181,7 @@ export default function StoryPlayer(p: Props) {
 
   return (
     <div className="card player">
-      <div className="player-panes" style={{ gridTemplateColumns: `${widths[0]}px 6px 1fr 6px ${widths[1]}px` }}>
+      <div className="player-top" style={{ gridTemplateColumns: `${listWidth}px 6px 1fr` }}>
         <div className="player-list">
           <div className="field-label">Stories (newest first)</div>
           <div className="player-list-box">
@@ -194,24 +194,49 @@ export default function StoryPlayer(p: Props) {
           <button className="ghost" onClick={() => void refresh()}>Refresh</button>
           <button className="ghost" disabled={!story} onClick={() => story && void api.open(story.folder)}>Open folder</button>
         </div>
-        <div className="splitter" onMouseDown={(e) => startResize(0, e)} title="Drag to resize" />
-        <div className="player-stage" ref={stage} onWheel={onWheel} onMouseDown={onMouseDown}
-          onContextMenu={(e) => { e.preventDefault(); setView({ zoom: 1, x: 0, y: 0 }) }}>
-          {story?.image
-            ? <img src={api.fileUrl(story.image)} alt={story.title} draggable={false}
-                style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }} />
-            : <div className="hint">{story ? 'storyboard image not found' : ''}</div>}
-          {story?.image && (
-            <div className="stage-hint">wheel: zoom at the pointer · drag: move · right-click: reset
-              {view.zoom !== 1 ? ` · ${Math.round(view.zoom * 100)}%` : ''}</div>
-          )}
+        <div className="splitter" onMouseDown={startResize} title="Drag to resize" />
+        <div className="player-main">
+          <div className="player-stage" ref={stage} onWheel={onWheel} onMouseDown={onMouseDown}
+            onContextMenu={(e) => { e.preventDefault(); setView({ zoom: 1, x: 0, y: 0 }) }}>
+            {story?.image
+              ? <img src={api.fileUrl(story.image)} alt={story.title} draggable={false}
+                  style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }} />
+              : <div className="hint">{story ? 'storyboard image not found' : ''}</div>}
+            {story?.image && (
+              <div className="stage-hint">wheel: zoom at the pointer · drag: move · right-click: reset
+                {view.zoom !== 1 ? ` · ${Math.round(view.zoom * 100)}%` : ''}</div>
+            )}
+          </div>
+
+          <div className="player-controls">
+            <button className="ghost" title="Previous scene" onClick={() => jumpScene(-1)}>⏮</button>
+            <button className="ghost" title="Back 10 seconds (Left arrow: 5 s)" onClick={() => skip(-10)}>⏪ 10s</button>
+            <button className="ghost" title="Play / Pause (Space)" onClick={toggle} disabled={!story?.audio}>{playing ? '⏸' : '▶'}</button>
+            <button className="ghost" title="Forward 10 seconds (Right arrow: 5 s)" onClick={() => skip(10)}>10s ⏩</button>
+            <button className="ghost" title="Next scene" onClick={() => jumpScene(1)}>⏭</button>
+            <button className="ghost" title="Stop (back to the start)" onClick={stop}>⏹</button>
+            <input type="range" className="seek" min={0} max={Math.max(0.1, duration)} step={0.1}
+              value={shownPos} disabled={!story?.audio}
+              onChange={(e) => setSeeking(Number(e.target.value))}
+              onMouseUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }}
+              onKeyUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }} />
+            <span className="time">
+              {story && !story.audio ? (story.audio_deleted ? 'no audio' : 'audio error') : `${clock(shownPos)} / ${clock(duration)}`}
+            </span>
+          </div>
+          <div className="hint scene-line">
+            {scene ? `${story?.scene_word} ${scene.number}/${scenes.length}${scene.heading ? ` — ${scene.heading}` : ''}` : ''}
+            {story && !story.audio && story.audio_deleted ? 'this story has no audio (deleted)' : ''}
+          </div>
         </div>
-        <div className="splitter" onMouseDown={(e) => startResize(1, e)} title="Drag to resize" />
-        <div className="player-script" ref={scriptBox}>
-          {story && (
-            <>
-              <h2>{story.title}</h2>
-              {story.logline && <p className="logline">{story.logline}</p>}
+      </div>
+
+      <div className="player-script" ref={scriptBox}>
+        {story && (
+          <>
+            <h2>{story.title}</h2>
+            {story.logline && <p className="logline">{story.logline}</p>}
+            <div className="scene-row">
               {scenes.map((sc, i) => (
                 <div key={i} className={`scene${i === current ? ' scene-current' : ''}`}
                   onClick={() => seek(Number(sc.start ?? 0))} title="Click to play from this scene">
@@ -221,34 +246,13 @@ export default function StoryPlayer(p: Props) {
                   <div>{sc.narration}</div>
                 </div>
               ))}
-              {story.voice_id && (
-                <p className="voice-line">Voz: {story.voice_label || story.voice_id}
-                  {story.voice_reason ? ` — ${story.voice_reason}` : ''}</p>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="player-controls">
-        <button className="ghost" title="Previous scene" onClick={() => jumpScene(-1)}>⏮</button>
-        <button className="ghost" title="Back 10 seconds (Left arrow: 5 s)" onClick={() => skip(-10)}>⏪ 10s</button>
-        <button className="ghost" title="Play / Pause (Space)" onClick={toggle} disabled={!story?.audio}>{playing ? '⏸' : '▶'}</button>
-        <button className="ghost" title="Forward 10 seconds (Right arrow: 5 s)" onClick={() => skip(10)}>10s ⏩</button>
-        <button className="ghost" title="Next scene" onClick={() => jumpScene(1)}>⏭</button>
-        <button className="ghost" title="Stop (back to the start)" onClick={stop}>⏹</button>
-        <input type="range" className="seek" min={0} max={Math.max(0.1, duration)} step={0.1}
-          value={shownPos} disabled={!story?.audio}
-          onChange={(e) => setSeeking(Number(e.target.value))}
-          onMouseUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }}
-          onKeyUp={() => { if (seeking !== null) seek(seeking); setSeeking(null) }} />
-        <span className="time">
-          {story && !story.audio ? (story.audio_deleted ? 'no audio' : 'audio error') : `${clock(shownPos)} / ${clock(duration)}`}
-        </span>
-      </div>
-      <div className="hint scene-line">
-        {scene ? `${story?.scene_word} ${scene.number}/${scenes.length}${scene.heading ? ` — ${scene.heading}` : ''}` : ''}
-        {story && !story.audio && story.audio_deleted ? 'this story has no audio (deleted)' : ''}
+            </div>
+            {story.voice_id && (
+              <p className="voice-line">Voz: {story.voice_label || story.voice_id}
+                {story.voice_reason ? ` — ${story.voice_reason}` : ''}</p>
+            )}
+          </>
+        )}
       </div>
       {story?.audio && (
         <audio ref={audio} src={api.fileUrl(story.audio)} preload="metadata"
