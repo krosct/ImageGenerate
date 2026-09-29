@@ -5,7 +5,7 @@ import Model from './tabs/Model'
 import Dir from './tabs/Dir'
 import Injection from './tabs/Injection'
 import Analyse from './tabs/Analyse'
-import StoryApp from './story/StoryApp'
+import StoryApp, { type StoryTab } from './story/StoryApp'
 import { extractTemplateVars, parseCountText } from './injection'
 import { formatSort, parseSort } from './tableView'
 
@@ -21,6 +21,7 @@ export default function App() {
   // which app is shown: ImageGenerate or StoryGenerate (#story in the URL)
   const [app, setApp] = useState<AppName>(window.location.hash === '#story' ? 'story' : 'image')
   const [tab, setTab] = useState<'generate' | 'model' | 'dir' | 'analyse' | 'injection'>('generate')
+  const [storyTab, setStoryTab] = useState<StoryTab>('generate')
   const [injectionCells, setInjectionCells] = useState<string[][]>([])
   const [cfg, setCfg] = useState<AppConfig>(DEFAULTS)
   const [meta, setMeta] = useState<ProvidersResponse | null>(null)
@@ -116,6 +117,13 @@ export default function App() {
               </button>
             )}
           </nav>}
+          {app === 'story' && <nav className="tabs">
+            {(['generate', 'model', 'voices', 'player'] as const).map((t) => (
+              <button key={t} className={storyTab === t ? 'active' : ''} onClick={() => setStoryTab(t)}>
+                {t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </nav>}
           <a className="help-btn" href={app === 'story' ? '/help#story' : '/help'} target="_blank" rel="noreferrer"
             title="Open docs (docs.html)">?</a>
         </div>
@@ -133,7 +141,7 @@ export default function App() {
 
       {notice && <div className="notice">{notice}</div>}
 
-      {app === 'story' && <StoryApp notice={setNotice} />}
+      {app === 'story' && <StoryApp notice={setNotice} tab={storyTab} setTab={setStoryTab} />}
 
       {app === 'image' && <>
 
