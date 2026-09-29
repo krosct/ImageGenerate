@@ -157,6 +157,7 @@ class GenerateValidationTest(WebBase):
                      {"count": 3, "dynamic_dirs": {"output_dir": "1"}},
                      {"count": 3, "dynamic_dirs": {"output_dir": {"start": "3", "range": "3"}}},
                      {"count": 3, "dynamic_dirs": {"output_dir": {"start": "0", "range": "3"}}},
+                     {"count": 3, "dynamic_dirs": {"output_dir": {"range": "3", "batch": "0"}}},
                      {"count": 3, "dynamic_dirs": {"context_dir": "2"},
                       "context_dir": str(self.out)}):
             resp = self.client.post("/api/generate", json={**base, **over})
@@ -221,6 +222,14 @@ class GenerateFlowTest(WebBase):
         self.assertEqual(merged["total_ops"], 3)
         stamps = [r["date"] for r in merged["rows"]]
         self.assertEqual(stamps, sorted(stamps, reverse=True))
+
+    def test_dynamic_output_batch_flow(self):
+        data = self._generate(count=5, dynamic_dirs={"output_dir": {"start": "2", "range": "9",
+                                                                    "batch": "2"}})
+        job = self._wait_job(data["job_id"])
+        self.assertEqual(job["status"], "done", job.get("error"))
+        folders = [Path(p).parent.name for p in job["result"]["images"]]
+        self.assertEqual(folders, ["2", "2", "3", "3", "4"])
 
     def test_events_stream_reports_done(self):
         data = self._generate()

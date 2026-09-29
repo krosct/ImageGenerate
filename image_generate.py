@@ -411,9 +411,12 @@ def nearest_existing_dir(path: str | os.PathLike | None) -> Path | None:
         current = current.parent
 
 
-# Dynamic dirs: generation i (0-based) uses <base>/<start + i % (range - start + 1)>,
-# i.e. folders start..range, cycling back to start. With start=1, range=5
-# generations 1..5 use folders 1..5 and generation 6 uses folder 1 again.
+# Dynamic dirs: generation i (0-based) uses
+#   <base>/<start + (i // batch) % (range - start + 1)>
+# i.e. `batch` consecutive generations share a folder, folders go
+# start..range and cycle back to start. With start=1, range=5, batch=1
+# generations 1..5 use folders 1..5 and generation 6 uses folder 1 again;
+# with start=2, range=12, batch=3 generations 1-3 -> 2, 4-6 -> 3, 7-9 -> 4...
 DYNAMIC_DIR_KEYS = ("output_dir", "context_dir", "memory_dir")
 
 
@@ -438,51 +441,67 @@ def parse_dynamic_range(raw: str | int | None, label: str = "Dynamic", start: in
     return int(text)
 
 
-def parse_dynamic_spec(raw: object, label: str = "Dynamic") -> tuple[int, int]:
-    """Parse one Dynamic spec into (start, range).
+def parse_dynamic_batch(raw: str | int | None, label: str = "Dynamic") -> int:
+    """Parse a Dynamic dir batch = generations per folder (natural number >= 1;
+    empty -> 1)."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return 1
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise ValueError(f"invalid {label} batch: {raw!r} (need a natural number >= 1)")
+    return int(text)
 
-    Accepts a plain range (str/int, start 1) or a dict {"start": ..., "range": ...}.
+
+def parse_dynamic_spec(raw: object, label: str = "Dynamic") -> tuple[int, int, int]:
+    """Parse one Dynamic spec into (start, range, batch).
+
+    Accepts a plain range (str/int, start 1, batch 1) or a dict
+    {"start": ..., "range": ..., "batch": ...} (start/batch default 1).
     """
     if isinstance(raw, dict):
         start = parse_dynamic_start(raw.get("start"), label)
-        return start, parse_dynamic_range(raw.get("range"), label, start)
-    return 1, parse_dynamic_range(raw, label)  # type: ignore[arg-type]
+        return (start, parse_dynamic_range(raw.get("range"), label, start),
+                parse_dynamic_batch(raw.get("batch"), label))
+    return 1, parse_dynamic_range(raw, label), 1  # type: ignore[arg-type]
 
 
-def dynamic_dir_for(base: str, dir_range: int, index: int, start: int = 1) -> str:
-    """Subfolder used by generation `index` (0-based): <base>/<start>..<base>/<range>, cycling."""
-    return str(Path(base).expanduser() / str(start + index % (dir_range - start + 1)))
+def dynamic_dir_for(base: str, dir_range: int, index: int, start: int = 1,
+                    batch: int = 1) -> str:
+    """Subfolder used by generation `index` (0-based): `batch` generations per
+    folder, folders <base>/<start>..<base>/<range>, cycling back to start."""
+    step = index // max(1, batch)
+    return str(Path(base).expanduser() / str(start + step % (dir_range - start + 1)))
 
 
 def check_dynamic_dirs(dynamic_dirs: dict | None, dirs: dict,
-                       total: int) -> dict[str, tuple[int, int]]:
+                       total: int) -> dict[str, tuple[int, int, int]]:
     """Validate {dir_key: spec} (see parse_dynamic_spec) against the base dirs
     and the generation total.
 
-    Returns {dir_key: (start, range)}. Raises ValueError (bad key/start/range,
+    Returns {dir_key: (start, range, batch)}. Raises ValueError (bad key/start/range/batch,
     missing base folder, total <= 1) or FileNotFoundError (context/memory
     subfolders that the batch would need but do not exist; output subfolders
     are created).
     """
-    parsed: dict[str, tuple[int, int]] = {}
+    parsed: dict[str, tuple[int, int, int]] = {}
     for key, raw in (dynamic_dirs or {}).items():
         if key not in DYNAMIC_DIR_KEYS:
             raise ValueError(f"unknown dynamic dir: {key!r} (use {', '.join(DYNAMIC_DIR_KEYS)})")
         label = key.replace("_dir", "").capitalize() + " dir Dynamic"
-        start, dir_range = parse_dynamic_spec(raw, label)
+        start, dir_range, batch = parse_dynamic_spec(raw, label)
         if total <= 1:
             raise ValueError(f"{label} needs more than one generation (count > 1)")
         base = str(dirs.get(key) or "").strip()
         if not base:
             raise ValueError(f"{label} needs a base folder")
         if key != "output_dir":
-            needed = [dynamic_dir_for(base, dir_range, i, start)
-                      for i in range(min(total, dir_range - start + 1))]
+            needed = sorted({dynamic_dir_for(base, dir_range, i, start, batch)
+                             for i in range(total)}, key=lambda path: int(Path(path).name))
             missing = [path for path in needed if not Path(path).is_dir()]
             if missing:
                 raise FileNotFoundError(
                     f"{label}: subfolder(s) not found: {', '.join(missing)}")
-        parsed[key] = (start, dir_range)
+        parsed[key] = (start, dir_range, batch)
     return parsed
 
 
@@ -2144,7 +2163,7 @@ def run_generation_batch(prompts: list[str], dynamic_dirs: dict | None = None,
     batch, removes partial files and logs nothing.
 
     dynamic_dirs ({dir_key: range or {"start", "range"}}, see
-    check_dynamic_dirs) makes generation i use <base>/<start + i % (range -
+    check_dynamic_dirs) makes generation i use <base>/<start + (i // batch) % (range -
     start + 1)> for that dir. With a single prompt it is
     repeated kwargs["count"] times (one call each, seed + i like the
     provider fan-out) so every generation can use its own folders.
@@ -2168,8 +2187,8 @@ def run_generation_batch(prompts: list[str], dynamic_dirs: dict | None = None,
     total_elapsed = 0.0
     for index, one_prompt in enumerate(prompts):
         overrides: dict = {"count": 1}
-        for key, (start, dir_range) in dynamic.items():
-            overrides[key] = dynamic_dir_for(str(kwargs[key]), dir_range, index, start)
+        for key, (start, dir_range, batch) in dynamic.items():
+            overrides[key] = dynamic_dir_for(str(kwargs[key]), dir_range, index, start, batch)
         if repeated and isinstance(seed, int):
             overrides["seed"] = seed + index
         result = run_generation(prompt=one_prompt, **{**kwargs, **overrides})  # type: ignore[arg-type]
@@ -2239,6 +2258,10 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(f"--dynamic-{name}-start", dest=f"dynamic_{name}_start",
                             default=None, metavar="START",
                             help=f"First folder of --dynamic-{name} (default: 1).")
+        parser.add_argument(f"--dynamic-{name}-batch", dest=f"dynamic_{name}_batch",
+                            default=None, metavar="BATCH",
+                            help=f"Generations per folder for --dynamic-{name} (default: 1): "
+                                 "with 3, generations 1-3 use START, 4-6 use START+1, ...")
     parser.add_argument("--model", default=None,
                         help="Image model slug (default: provider default model).")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER, choices=sorted(PROVIDERS),
@@ -2347,10 +2370,11 @@ def main_cli(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     dynamic_dirs = {f"{name}_dir": {"start": getattr(args, f"dynamic_{name}_start", None),
-                                    "range": getattr(args, f"dynamic_{name}", None)}
+                                    "range": getattr(args, f"dynamic_{name}", None),
+                                    "batch": getattr(args, f"dynamic_{name}_batch", None)}
                     for name in ("output", "context", "memory")
-                    if getattr(args, f"dynamic_{name}", None) is not None
-                    or getattr(args, f"dynamic_{name}_start", None) is not None}
+                    if any(getattr(args, f"dynamic_{name}{suffix}", None) is not None
+                           for suffix in ("", "_start", "_batch"))}
     try:
         check_dynamic_dirs(dynamic_dirs, {"output_dir": output_dir,
                                           "context_dir": args.context_dir,
@@ -2640,6 +2664,7 @@ def run_gui(defaults: dict | None = None) -> None:
         dyn_var = tk.BooleanVar(value=False)
         start_var = tk.StringVar(value="1")
         range_var = tk.StringVar(value="")
+        batch_var = tk.StringVar(value="1")
         dyn_check = ttk.Checkbutton(dyn_row, text="Dynamic", variable=dyn_var,
                                     state=tk.DISABLED)
         dyn_check.pack(side=tk.LEFT)
@@ -2647,9 +2672,12 @@ def run_gui(defaults: dict | None = None) -> None:
         start_entry = digits_entry(dyn_row, start_var)
         range_label = ttk.Label(dyn_row, text="Range:")
         range_entry = digits_entry(dyn_row, range_var)
+        batch_label = ttk.Label(dyn_row, text="Batch:")
+        batch_entry = digits_entry(dyn_row, batch_var)
         dynamic_widgets[key] = {"var": dyn_var, "start": start_var, "range": range_var,
-                                "check": dyn_check,
-                                "fields": ((start_label, start_entry), (range_label, range_entry)),
+                                "batch": batch_var, "check": dyn_check,
+                                "fields": ((start_label, start_entry), (range_label, range_entry),
+                                           (batch_label, batch_entry)),
                                 "name": label.rstrip(":")}
 
         def toggle_range(w: dict = dynamic_widgets[key]) -> None:
@@ -2665,15 +2693,21 @@ def run_gui(defaults: dict | None = None) -> None:
         folder = label.rstrip(":").lower()
         attach_help(dyn_check,
                     "Only available when n (image count) is greater than 1. "
-                    f"When checked, each generation uses a numbered subfolder of the {folder}: "
-                    f"<{folder}>/<Start>, <Start+1>, ... up to <Range>, then cycles back to Start "
-                    "(e.g. Start 2, Range 5: folders 2, 3, 4, 5, 2, ...).")
+                    f"When checked, the generations use numbered subfolders of the {folder}: "
+                    f"<{folder}>/<Start>, <Start+1>, ... up to <Range>, then cycle back to Start; "
+                    "Batch generations share each folder "
+                    "(e.g. Start 2, Range 5, Batch 1: folders 2, 3, 4, 5, 2, ...; "
+                    "Batch 3: 2, 2, 2, 3, 3, 3, 4, ...).")
         attach_help(start_entry,
                     "First subfolder number to use (natural number, default 1). "
                     "Use it to resume a batch without redoing the first folders.")
         attach_help(range_entry,
                     "Last subfolder number to use before cycling back to Start. "
                     "Required when Dynamic is checked (natural number > Start).")
+        attach_help(batch_entry,
+                    "How many consecutive generations go to the same subfolder before "
+                    "moving to the next one (natural number, default 1). E.g. Batch 3, "
+                    "Start 2, Range 12: generations 1-3 -> 2, 4-6 -> 3, 7-9 -> 4, ...")
         drow += 2
     tab_dir.columnconfigure(1, weight=1)
 
@@ -3166,11 +3200,12 @@ def run_gui(defaults: dict | None = None) -> None:
         dynamic_dirs: dict = {}
         for key, w in dynamic_widgets.items():
             if count > 1 and w["var"].get():
-                spec = {"start": w["start"].get().strip(), "range": w["range"].get().strip()}
+                spec = {"start": w["start"].get().strip(), "range": w["range"].get().strip(),
+                        "batch": w["batch"].get().strip()}
                 try:
                     parse_dynamic_spec(spec, f"{w['name']} Dynamic")
                 except ValueError as exc:
-                    messagebox.showerror("Invalid Dynamic start/range", str(exc))
+                    messagebox.showerror("Invalid Dynamic start/range/batch", str(exc))
                     return
                 dynamic_dirs[key] = spec
         if dynamic_dirs:

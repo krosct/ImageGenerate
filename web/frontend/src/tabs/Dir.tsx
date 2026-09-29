@@ -45,10 +45,10 @@ export default function Dir(p: Props) {
             </div>
             <div className="dynamic-row">
               <label className={`pill-check${checked ? ' on' : ''}`}
-                title={'Only available when n (image count) is greater than 1. When checked, each '
-                  + `generation uses a numbered subfolder of the ${label.toLowerCase()}: <Start>, `
-                  + '<Start+1>, ... up to <Range>, then cycles back to Start '
-                  + '(e.g. Start 2, Range 5: folders 2, 3, 4, 5, 2, ...).'}>
+                title={'Only available when n (image count) is greater than 1. When checked, the '
+                  + `generations use numbered subfolders of the ${label.toLowerCase()}: <Start>, `
+                  + '<Start+1>, ... up to <Range>, then cycle back to Start; Batch generations share '
+                  + 'each folder (e.g. Start 2, Range 5, Batch 3: 2, 2, 2, 3, 3, 3, 4, ...).'}>
                 <input type="checkbox" checked={checked} disabled={!dynamicEnabled}
                   onChange={(e) => setDynamic(key, { enabled: e.target.checked })} /> Dynamic
               </label>
@@ -66,6 +66,14 @@ export default function Dir(p: Props) {
                   Range:
                   <input type="text" inputMode="numeric" value={dyn.range} aria-label={`${label} Dynamic range`}
                     onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setDynamic(key, { range: e.target.value }) }} />
+                </label>
+              )}
+              {checked && (
+                <label className="dynamic-range"
+                  title="How many consecutive generations go to the same subfolder before moving to the next one (natural number, default 1). E.g. Batch 3, Start 2, Range 12: generations 1-3 -> 2, 4-6 -> 3, 7-9 -> 4, ...">
+                  Batch:
+                  <input type="text" inputMode="numeric" value={dyn.batch} aria-label={`${label} Dynamic batch`}
+                    onChange={(e) => { if (/^[0-9]*$/.test(e.target.value)) setDynamic(key, { batch: e.target.value }) }} />
                 </label>
               )}
             </div>

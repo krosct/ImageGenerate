@@ -26,10 +26,10 @@ export interface AppConfig {
   dry_run: boolean
 }
 
-// Dynamic dirs: generations use <dir>/<start>..<dir>/<range>, cycling back to
-// start (only when count > 1). Empty start = 1.
+// Dynamic dirs: generations use <dir>/<start>..<dir>/<range>, `batch` of them
+// per folder, cycling back to start (only when count > 1). Empty start/batch = 1.
 export type DynamicKey = 'output_dir' | 'context_dir' | 'memory_dir'
-export type DynamicDirs = Record<DynamicKey, { enabled: boolean; start: string; range: string }>
+export type DynamicDirs = Record<DynamicKey, { enabled: boolean; start: string; range: string; batch: string }>
 
 export interface LogResponse {
   rows: Record<string, string>[]

@@ -23,9 +23,9 @@ export default function App() {
   const [notice, setNotice] = useState('')
   const [countText, setCountText] = useState('1')
   const [dynamicDirs, setDynamicDirs] = useState<DynamicDirs>({
-    output_dir: { enabled: false, start: '1', range: '' },
-    context_dir: { enabled: false, start: '1', range: '' },
-    memory_dir: { enabled: false, start: '1', range: '' },
+    output_dir: { enabled: false, start: '1', range: '', batch: '1' },
+    context_dir: { enabled: false, start: '1', range: '', batch: '1' },
+    memory_dir: { enabled: false, start: '1', range: '', batch: '1' },
   })
 
   useEffect(() => {

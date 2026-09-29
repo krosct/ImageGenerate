@@ -150,7 +150,7 @@ export default function Generate(p: Props) {
         dynamic_dirs: count > 1
           ? Object.fromEntries(Object.entries(p.dynamicDirs)
             .filter(([, d]) => d.enabled)
-            .map(([k, d]) => [k, { start: d.start.trim(), range: d.range.trim() }]))
+            .map(([k, d]) => [k, { start: d.start.trim(), range: d.range.trim(), batch: d.batch.trim() }]))
           : {},
         seed: seedText.trim() === '' ? null : parseInt(seedText.trim(), 10) || null,
         dry_run: p.dryRun,
@@ -224,6 +224,11 @@ export default function Generate(p: Props) {
         }
         if (!/^[0-9]+$/.test(d.range.trim()) || parseInt(d.range.trim(), 10) <= start) {
           setStatus(`error: invalid ${label} dir Dynamic range (need a natural number > ${start}) — Dir tab`)
+          return
+        }
+        const batchText = d.batch.trim() || '1'
+        if (!/^[0-9]+$/.test(batchText) || parseInt(batchText, 10) < 1) {
+          setStatus(`error: invalid ${label} dir Dynamic batch (need a natural number >= 1) — Dir tab`)
           return
         }
       }

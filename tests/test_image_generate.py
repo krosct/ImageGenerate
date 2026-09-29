@@ -1675,9 +1675,9 @@ class DynamicDirsTest(IsolatedEnvMixin):
         for bad in ["0", "-1", "x", "1.5"]:
             with self.assertRaises(ValueError, msg=repr(bad)):
                 ig.parse_dynamic_start(bad)
-        self.assertEqual(ig.parse_dynamic_spec("5"), (1, 5))
-        self.assertEqual(ig.parse_dynamic_spec({"start": "", "range": "5"}), (1, 5))
-        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12"}), (2, 12))
+        self.assertEqual(ig.parse_dynamic_spec("5"), (1, 5, 1))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "", "range": "5"}), (1, 5, 1))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12"}), (2, 12, 1))
         for bad in ({"start": "5", "range": "5"}, {"start": "6", "range": "5"},
                     {"start": "2", "range": ""}):
             with self.assertRaises(ValueError, msg=repr(bad)):
@@ -1712,13 +1712,66 @@ class DynamicDirsTest(IsolatedEnvMixin):
         with self.assertRaisesRegex(ValueError, "unknown"):
             ig.check_dynamic_dirs({"foo": "3"}, {}, 3)
 
+    def test_batch_user_example_folders(self):
+        # batch 3, start 2, range 12: 1-3 -> 2, 4-6 -> 3, 7-9 -> 4, ...
+        got = [Path(ig.dynamic_dir_for("/a", 12, i, 2, 3)).name for i in range(12)]
+        self.assertEqual(got, ["2"] * 3 + ["3"] * 3 + ["4"] * 3 + ["5"] * 3)
+        # past range the cycle restarts at start (batch 2, folders 1..3)
+        got = [Path(ig.dynamic_dir_for("/a", 3, i, 1, 2)).name for i in range(8)]
+        self.assertEqual(got, ["1", "1", "2", "2", "3", "3", "1", "1"])
+        # batch 1 == previous behaviour
+        self.assertEqual([Path(ig.dynamic_dir_for("/a", 5, i, 2)).name for i in range(5)],
+                         ["2", "3", "4", "5", "2"])
+
+    def test_parse_dynamic_batch(self):
+        self.assertEqual(ig.parse_dynamic_batch(""), 1)
+        self.assertEqual(ig.parse_dynamic_batch(None), 1)
+        self.assertEqual(ig.parse_dynamic_batch(" 3 "), 3)
+        for bad in ["0", "-1", "x", "1.5"]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_batch(bad)
+        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12", "batch": "3"}),
+                         (2, 12, 3))
+        with self.assertRaisesRegex(ValueError, "batch"):
+            ig.parse_dynamic_spec({"range": "5", "batch": "0"})
+
+    def test_batch_needs_only_the_folders_it_uses(self):
+        tmp, _ = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "2", "3")
+        # 6 generations, batch 3 -> folders 2 and 3 only (range 12 not required)
+        self.assertEqual(ig.check_dynamic_dirs({"context_dir": {"start": "2", "range": "12",
+                                                                "batch": "3"}},
+                                               {"context_dir": str(ctx)}, 6),
+                         {"context_dir": (2, 12, 3)})
+        with self.assertRaisesRegex(FileNotFoundError, r"ctx/4"):
+            ig.check_dynamic_dirs({"context_dir": {"start": "2", "range": "12", "batch": "3"}},
+                                  {"context_dir": str(ctx)}, 7)
+
+    def test_batch_run_and_cli(self):
+        _, out = self.make_dirs()
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=7).items() if k != "prompt"}
+        result = ig.run_generation_batch(
+            ["hi"], dynamic_dirs={"output_dir": {"start": "2", "range": "12", "batch": "3"}},
+            **kwargs)
+        self.assertEqual([Path(p).parent.name for p in result["images"]],
+                         ["2", "2", "2", "3", "3", "3", "4"])
+        _, out2 = self.make_dirs()
+        args = MainCliTest._args(self, out2, count=4, dynamic_output="5",
+                                 dynamic_output_batch="2")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(ig.main_cli(args), 0)
+        self.assertEqual(sorted(p.name for p in out2.iterdir() if p.is_dir()), ["1", "2"])
+        parsed = ig.build_parser().parse_args(["--dynamic-memory", "9",
+                                               "--dynamic-memory-batch", "4"])
+        self.assertEqual(parsed.dynamic_memory_batch, "4")
+
     def test_check_missing_context_subfolders(self):
         tmp, _ = self.make_dirs()
         ctx = self._base(Path(tmp.name) / "ctx", "1", "2")
         # count 2 only needs 1..2 -> ok even with range 10
         self.assertEqual(ig.check_dynamic_dirs({"context_dir": "10"},
                                                {"context_dir": str(ctx)}, 2),
-                         {"context_dir": (1, 10)})
+                         {"context_dir": (1, 10, 1)})
         with self.assertRaisesRegex(FileNotFoundError, "3"):
             ig.check_dynamic_dirs({"context_dir": "10"}, {"context_dir": str(ctx)}, 3)
 
