@@ -92,6 +92,33 @@ python3 image_generate.py --list-log
 
 ---
 
+# 🎙️ StoryGenerate (storyboard → história narrada)
+
+`story_generate.py` recebe uma pasta de storyboards e, para cada imagem:
+
+1. um **modelo escritor** (OpenRouter, com visão; padrão `google/gemini-3.7-flash`) lê os quadros em ordem (esquerda → direita, cima → baixo), escreve uma cena por quadro com transições entre elas, dá um título curto e **escolhe a voz** mais adequada entre até 5 vozes do **Fish Audio**;
+2. o **Fish Audio, via OpenRouter** (`/api/v1/audio/speech`; padrão `fish-audio/s2.1-pro-free:free`, grátis), narra cada cena com a voz escolhida (as cenas são unidas num só `audio.wav`, com uma pausa curta entre elas);
+3. sai uma pasta `<título>/` com `storyboard.png`, `roteiro.md`, `audio.wav` e `story.json` (+ `log_story_generate.csv` na pasta de saída).
+
+Na aba **Generate** você escolhe o **roteirista** — *Descritivo* (fiel ao que cada quadro mostra) ou *Narrativo* (foca nas transições: preenche o que aconteceu entre um quadro e o próximo) — e a **duração** da narração (vazio = automático; ex.: `90`, `1:30`, `2m`), convertida em palavras pela velocidade real de cada voz medida nas suas histórias anteriores. A linha azul mostra o passo atual (enviando ao roteirista, narrando cena 3/6, tentando de novo após limite 429…). Falhas ficam **em vermelho** no log com o motivo: **Retry failed** refaz só elas (ou duplo clique / botão direito numa linha vermelha).
+
+A aba **Player** mostra o storyboard com o roteiro ao lado e toca a história: ▶/⏸, ⏪ 10 s, 10 s ⏩, ⏮/⏭ cena, ⏹ e barra de busca; a cena atual fica destacada (clique numa cena para pular até ela; atalhos: espaço, ←/→, ↑/↓). Storyboards já transformados são pulados (mesmo hash) para não gastar de novo.
+
+```bash
+python3 story_generate.py --gui
+python3 story_generate.py --input-dir ./storyboards --dry-run          # offline, sem custo
+python3 story_generate.py --input-dir ./storyboards \
+  --voice <voice_id_1>=narradora --voice <voice_id_2>=menino           # até 5 vozes
+python3 story_generate.py --input-dir ./storyboards --style connective --duration 1:30
+python3 story_generate.py --retry-failed                               # só os que falharam
+python3 story_generate.py --check-voices --voice <voice_id>            # confere as vozes
+python3 story_generate.py --play "~/Imagens/StoryGenerate/Um dia comum" # toca no terminal
+```
+
+Chave: **uma só**, a do OpenRouter (a mesma do ImageGenerate, cofre compartilhado) — serve para o escritor e para a narração; não precisa de conta no Fish Audio. O voice id é o código na URL da voz (`fish.audio/m/<id>`). O custo da narração é buscado no OpenRouter no fim do lote (as estatísticas levam ~15 s) e vai para `tts_cost_usd` no log. O player usa `aplay` (ou `pw-play`/`ffplay`).
+
+---
+
 # 📚 Documentação completa
 
 O arquivo [`docs.html`](docs.html) é a documentação completa do programa — não precisa de internet, abre direto no navegador. Use a busca no topo para encontrar rapidamente o que precisa.
