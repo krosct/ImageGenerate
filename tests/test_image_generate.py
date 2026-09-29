@@ -57,7 +57,7 @@ class IsolatedEnvMixin(unittest.TestCase):
         os.environ["XDG_CONFIG_HOME"] = self._tmp_config.name
         self._had_env: dict[str, bool] = {}
         self._saved_env: dict[str, str | None] = {}
-        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
             self._had_env[var] = var in os.environ
             self._saved_env[var] = os.environ.get(var)
             os.environ.pop(var, None)
@@ -68,7 +68,7 @@ class IsolatedEnvMixin(unittest.TestCase):
             os.environ["XDG_CONFIG_HOME"] = self._old_xdg
         else:
             os.environ.pop("XDG_CONFIG_HOME", None)
-        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        for var in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
             if self._had_env[var] and self._saved_env[var] is not None:
                 restored = self._saved_env[var]
                 assert restored is not None
@@ -125,6 +125,7 @@ class ProviderRegistryTest(IsolatedEnvMixin):
         self.assertEqual(ig.normalize_provider("openrouter"), "openrouter")
         self.assertEqual(ig.normalize_provider("  OpenRouter "), "openrouter")
         self.assertEqual(ig.normalize_provider("GEMINI"), "gemini")
+        self.assertEqual(ig.normalize_provider("OpenAI"), "openai")
 
     def test_normalize_invalid(self):
         for bad in ["", "  ", "has space", "UPPER SPACE", "../x", "a_b", "prov!"]:
@@ -134,6 +135,11 @@ class ProviderRegistryTest(IsolatedEnvMixin):
     def test_normalize_unknown(self):
         with self.assertRaises(ValueError):
             ig.normalize_provider("dallex")
+
+    def test_normalize_unknown_lists_supported(self):
+        with self.assertRaises(ValueError) as ctx:
+            ig.normalize_provider("anthropic")
+        self.assertIn("suportados", str(ctx.exception))
 
     def test_registry_entries_have_contract_fields(self):
         for pid, info in ig.PROVIDERS.items():
@@ -159,10 +165,11 @@ class ParseCountTest(IsolatedEnvMixin):
     def test_valid_boundaries(self):
         self.assertEqual(ig.parse_count(1), 1)
         self.assertEqual(ig.parse_count(10), 10)
+        self.assertEqual(ig.parse_count(30), 30)
         self.assertEqual(ig.parse_count(" 3 "), 3)
 
     def test_invalid(self):
-        for bad in [0, 11, -1, "0", "11", "abc", "", None, "1.5", "  "]:
+        for bad in [0, 31, -1, "0", "31", "abc", "", None, "1.5", "  "]:
             with self.assertRaises(ValueError, msg=repr(bad)):
                 ig.parse_count(bad)
 
@@ -832,9 +839,20 @@ class HttpCancelTest(IsolatedEnvMixin):
 
 class ProviderRequestTest(IsolatedEnvMixin):
 
-    def _ok_payload(self):
+    def setUp(self):
+        super().setUp()
+        # Keep capability discovery offline: unknown model -> caps None.
+        self._caps_fetch = mock.patch.object(
+            ig, "_fetch_json", return_value=(404, "not found"))
+        self._caps_fetch.start()
+        self.addCleanup(self._caps_fetch.stop)
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _ok_payload(self, n=1):
         raw = _png_bytes()
-        return {"data": [{"b64_json": base64.b64encode(raw).decode()}],
+        return {"data": [{"b64_json": base64.b64encode(raw).decode()}
+                         for _ in range(n)],
                 "usage": {"cost": 0.02}, "created": 1700000000}
 
     def test_openrouter_body_and_contract(self):
@@ -842,7 +860,8 @@ class ProviderRequestTest(IsolatedEnvMixin):
 
         def fake_post(url, body, headers, timeout_s, cancel_event=None):
             captured["body"] = body
-            return 200, json.dumps(self._ok_payload())
+            captured["calls"] = captured.get("calls", 0) + 1
+            return 200, json.dumps(self._ok_payload(n=body.get("n", 1)))
 
         with mock.patch.object(ig, "_post_json", side_effect=fake_post):
             payload, start_ts, elapsed = ig.request_openrouter(
@@ -850,12 +869,67 @@ class ProviderRequestTest(IsolatedEnvMixin):
                 resolution="1K", references=[], output_format="png",
                 seed=7, count=2, timeout_s=5)
         body = captured["body"]
+        self.assertEqual(captured["calls"], 1)  # provider honored n=2
         self.assertEqual(body["model"], "m")
         self.assertEqual(body["n"], 2)
         self.assertEqual(body["seed"], 7)
         self.assertNotIn("input_references", body)
         self.assertIn("data", payload)
+        self.assertEqual(payload["seeds"], [7, 7])
         self.assertGreaterEqual(elapsed, 0.0)
+
+    def _zod_n_too_big(self, maximum=10) -> str:
+        issues = json.dumps([{"origin": "number", "code": "too_big", "maximum": maximum,
+                              "inclusive": True, "path": ["n"],
+                              "message": f"Too big: expected number to be <={maximum}"}],
+                            indent=2)
+        return json.dumps({"success": False,
+                           "error": {"name": "ZodError", "message": issues}})
+
+    def test_n_limit_from_error(self):
+        self.assertEqual(ig._n_limit_from_error(
+            "OpenRouter HTTP 400: " + self._zod_n_too_big(10)), 10)
+        self.assertEqual(ig._n_limit_from_error(self._zod_n_too_big(4)), 4)
+        self.assertIsNone(ig._n_limit_from_error("OpenRouter HTTP 400: bad seed"))
+        self.assertIsNone(ig._n_limit_from_error(
+            self._zod_n_too_big().replace('\\"n\\"', '\\"seed\\"')))
+
+    def test_openrouter_count_above_api_max_is_split(self):
+        # n=24 with unknown caps: calls of <= 10 (10 + 10 + 4), seeds per call.
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            if body["n"] > ig.OPENROUTER_MAX_N:
+                return 400, self._zod_n_too_big()
+            return 200, json.dumps(self._ok_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                resolution="1K", references=[], output_format="png",
+                seed=5, count=24, timeout_s=5)
+        self.assertEqual(ns, [10, 10, 4])
+        self.assertEqual(len(payload["data"]), 24)
+        self.assertEqual(payload["seeds"], [5] * 10 + [6] * 10 + [7] * 4)
+
+    def test_openrouter_retries_with_router_n_limit(self):
+        # Router lowers its limit below our constant: parse it and retry once.
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            if body["n"] > 4:
+                return 400, self._zod_n_too_big(4)
+            return 200, json.dumps(self._ok_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                resolution="1K", references=[], output_format="png",
+                seed=None, count=9, timeout_s=5)
+        self.assertEqual(ns, [9, 4, 4, 1])
+        self.assertEqual(len(payload["data"]), 9)
 
     def test_openrouter_optional_fields(self):
         captured = {}
@@ -881,12 +955,395 @@ class ProviderRequestTest(IsolatedEnvMixin):
                     resolution="1K", references=[], output_format="png",
                     seed=None, count=1, timeout_s=5)
 
-    def test_gemini_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            ig.request_gemini(
-                api_key="k", model="m", prompt="p", aspect_ratio="1:1",
-                resolution="1K", references=[], output_format="png",
-                seed=None, count=1, timeout_s=5)
+    def test_openrouter_content_policy_raises_friendly(self):
+        raw = json.dumps({"error": {"message": "The response was filtered due to "
+                                      "the prompt triggering our content "
+                                      "management policy.", "code": 400,
+                                     "metadata": {"provider_name": "Meta"}}})
+        with mock.patch.object(ig, "_post_json", return_value=(400, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                ig.request_openrouter(
+                    api_key="k", model="meta/muse-image", prompt="um gato",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        message = str(ctx.exception)
+        self.assertIsInstance(ctx.exception, RuntimeError)
+        self.assertIn("filtro de conteudo", message)
+        self.assertIn("um gato", message)
+        self.assertIn("Context dir", message)
+        self.assertIn("Meta", message)
+
+    def test_openrouter_caps_fetch_failure_keeps_body(self):
+        # _fetch_json patched in setUp returns 404 -> caps None -> body unchanged.
+        with mock.patch.object(ig, "_post_json",
+                               return_value=(200, json.dumps(self._ok_payload()))):
+            payload, _ts, _el = ig.request_openrouter(
+                api_key="k", model="m", prompt="p", aspect_ratio="21:9",
+                resolution="1K", references=[], output_format="webp",
+                seed=7, count=2, timeout_s=5)
+        self.assertIn("data", payload)
+
+    def test_openrouter_adapts_body_to_model_capabilities(self):
+        # Regression: flux.2-klein-4b rejects resolution/n>1/webp (HTTP 400).
+        endpoints = {"endpoints": [{
+            "provider_name": "Black Forest Labs",
+            "supported_parameters": {
+                "aspect_ratio": {"type": "enum",
+                                 "values": ["1:1", "4:3", "16:9", "21:9", "auto"]},
+                "output_format": {"type": "enum", "values": ["png", "jpeg"]},
+                "n": {"type": "range", "min": 1, "max": 1},
+                "input_references": {"type": "range", "min": 0, "max": 4},
+                "seed": {"type": "boolean"},
+            },
+        }]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                payload, _ts, _el = ig.request_openrouter(
+                    api_key="k", model="black-forest-labs/flux.2-klein-4b",
+                    prompt="p", aspect_ratio="21:9", resolution="1K",
+                    references=[{"type": "image_url"}] * 6,
+                    output_format="webp", seed=7, count=3, timeout_s=5)
+        # n=1-only provider: one request per image, payloads merged.
+        self.assertEqual(len(bodies), 3)
+        for index, body in enumerate(bodies):
+            self.assertNotIn("resolution", body)  # unsupported -> dropped
+            self.assertEqual(body["aspect_ratio"], "21:9")  # supported -> kept
+            self.assertEqual(body["output_format"], "png")  # webp -> first enum
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(len(body["input_references"]), 4)  # clamped to max
+            self.assertEqual(body["seed"], 7 + index)  # seed varied per call
+        self.assertEqual(len(payload["data"]), 3)
+        self.assertEqual(payload["seeds"], [7, 8, 9])  # effective seeds logged
+
+    def test_openrouter_caps_cached_across_calls(self):
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "n": {"type": "range", "min": 1, "max": 2}}}]}
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))) as fetch:
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                ig.request_openrouter(
+                    api_key="k", model="cached/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=2, timeout_s=5)
+                ig.request_openrouter(
+                    api_key="k", model="cached/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=2, timeout_s=5)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_closest_ratio_mapping(self):
+        values = ["1:1", "4:3", "16:9", "21:9", "auto"]
+        self.assertEqual(ig._closest_ratio("16:9", values), "16:9")
+        self.assertEqual(ig._closest_ratio("9:16", values), "1:1")  # log-closest
+        self.assertIsNone(ig._closest_ratio("auto", ["1:1", "16:9"]))
+
+    def test_openrouter_resolution_value_validated_against_enum(self):
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "resolution": {"type": "enum", "values": ["1K", "2K", "4K"]},
+            "n": {"type": "range", "min": 1, "max": 10}}}]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._ok_payload())
+
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                ig.request_openrouter(
+                    api_key="k", model="tiered/model", prompt="p",
+                    aspect_ratio="1:1", resolution="512", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        self.assertNotIn("resolution", bodies[0])  # 512 not in enum -> dropped
+
+    def test_openrouter_capabilities_intersect_across_endpoints(self):
+        endpoints = {"endpoints": [
+            {"supported_parameters": {
+                "resolution": {"type": "enum", "values": ["1K", "2K"]},
+                "n": {"type": "range", "min": 1, "max": 4},
+                "seed": {"type": "boolean"}}},
+            {"supported_parameters": {
+                "resolution": {"type": "enum", "values": ["2K", "4K"]},
+                "n": {"type": "range", "min": 1, "max": 2}}},
+        ]}
+        with mock.patch.object(ig, "_fetch_json",
+                               return_value=(200, json.dumps(endpoints))):
+            caps = ig._model_capabilities("multi/ep", "k")
+        self.assertIsNotNone(caps)
+        assert caps is not None
+        self.assertEqual(caps["resolution"], {"type": "enum", "values": ["2K"]})
+        self.assertEqual(caps["n"], {"type": "range", "min": 1, "max": 2})
+        self.assertNotIn("seed", caps)
+
+    def test_openrouter_reactive_retry_on_capability_mismatch(self):
+        mismatch = json.dumps({"error": {
+            "message": "No provider for m supports the requested parameter(s): "
+                       'resolution "1K"',
+            "code": 400,
+            "metadata": {"failed_routing_step": "Filter by Image Capabilities"}}})
+        endpoints = {"endpoints": [{"supported_parameters": {
+            "aspect_ratio": {"type": "enum", "values": ["1:1"]},
+            "n": {"type": "range", "min": 1, "max": 1}}}]}
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            if len(bodies) == 1:
+                return 400, mismatch
+            return 200, json.dumps(self._ok_payload())
+
+        fetches = [(404, "not found"), (200, json.dumps(endpoints))]
+        with mock.patch.object(ig, "_fetch_json", side_effect=fetches):
+            with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+                payload, _ts, _el = ig.request_openrouter(
+                    api_key="k", model="flaky/model", prompt="p",
+                    aspect_ratio="1:1", resolution="1K", references=[],
+                    output_format="png", seed=None, count=1, timeout_s=5)
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("resolution", bodies[0])  # first attempt: full body
+        self.assertNotIn("resolution", bodies[1])  # retry: adapted body
+        self.assertIn("data", payload)
+
+    def test_openrouter_retry_gives_up_when_caps_missing(self):
+        mismatch = json.dumps({"error": {
+            "message": "No provider for m supports the requested parameter(s)",
+            "code": 400}})
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            return 400, mismatch
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            with self.assertRaises(RuntimeError):
+                ig.request_openrouter(
+                    api_key="k", model="m", prompt="p", aspect_ratio="1:1",
+                    resolution="1K", references=[], output_format="png",
+                    seed=None, count=1, timeout_s=5)
+
+    def test_build_final_prompt_skips_supported_params(self):
+        caps = {"aspect_ratio": {"type": "enum", "values": ["1:1"]},
+                "resolution": {"type": "enum", "values": ["1K"]}}
+        # Supported params travel via API: no redundant text hint.
+        out = ig.build_final_prompt("a cat", "", "1:1", "1K", caps)
+        self.assertEqual(out, "a cat")
+        out = ig.build_final_prompt("a cat", "", "16:9", "2K", caps)
+        self.assertEqual(out, "a cat")
+        # Unsupported/unknown: hint kept as fallback.
+        out = ig.build_final_prompt("a cat", "", "16:9", "2K", {})
+        self.assertIn("aspect ratio 16:9", out)
+        self.assertIn("resolution tier 2K", out)
+        out = ig.build_final_prompt("a cat", "", "1:1", "1K")
+        self.assertIn("aspect ratio 1:1", out)
+
+
+class OpenaiRequestTest(IsolatedEnvMixin):
+
+    def setUp(self):
+        super().setUp()
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _b64_payload(self, n=1, created=1700000000):
+        raw = _png_bytes()
+        return {"created": created,
+                "data": [{"b64_json": base64.b64encode(raw).decode()}
+                         for _ in range(n)]}
+
+    def _call(self, **over):
+        params = {"api_key": "k", "model": "gpt-image-1", "prompt": "p",
+                  "aspect_ratio": "16:9", "resolution": "1K", "references": [],
+                  "output_format": "png", "seed": None, "count": 1,
+                  "timeout_s": 5}
+        params.update(over)
+        return ig.request_openai(**params)
+
+    def test_count_above_api_max_is_split(self):
+        ns = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            ns.append(body["n"])
+            return 200, json.dumps(self._b64_payload(n=body["n"]))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=24)
+        self.assertEqual(ns, [10, 10, 4])
+        self.assertEqual(len(payload["data"]), 24)
+
+    def test_gpt_image_body(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            return 200, json.dumps(self._b64_payload(n=2))
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=2)
+        self.assertTrue(urls[0].endswith("/v1/images/generations"))
+        self.assertEqual(bodies[0]["size"], "1536x1024")  # 16:9 landscape
+        self.assertEqual(bodies[0]["quality"], "medium")  # 1K tier
+        self.assertEqual(bodies[0]["n"], 2)
+        self.assertEqual(bodies[0]["output_format"], "png")
+        self.assertNotIn("response_format", bodies[0])
+        self.assertEqual(len(payload["data"]), 2)
+        self.assertEqual(payload["seeds"], [None, None])
+
+    def test_dalle3_single_only_loops(self):
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(model="dall-e-3", count=3,
+                                           aspect_ratio="9:16")
+        self.assertEqual(len(bodies), 3)
+        for body in bodies:
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(body["size"], "1024x1792")  # portrait
+            self.assertEqual(body["response_format"], "b64_json")
+        self.assertEqual(len(payload["data"]), 3)
+
+    def test_dalle2_size_and_quality_defaults(self):
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            self._call(model="dall-e-2", aspect_ratio="16:9")
+        self.assertEqual(bodies[0]["size"], "1024x1024")  # square only
+        self.assertNotIn("quality", bodies[0])
+
+    def test_references_rejected_informatively(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call(references=[{"type": "image_url"}])
+        self.assertIn("não aceita imagens de referência", str(ctx.exception))
+
+    def test_unknown_model_prefix_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._call(model="flux-fake-1")
+        self.assertIn("não parece ser do provider", str(ctx.exception))
+
+    def test_moderation_block_becomes_content_policy_error(self):
+        raw = json.dumps({"error": {"code": "moderation_blocked",
+                                    "message": "blocked", "type": "error"}})
+        with mock.patch.object(ig, "_post_json", return_value=(400, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                self._call()
+        self.assertIn("OpenAI", str(ctx.exception))
+
+
+class GeminiRequestTest(IsolatedEnvMixin):
+
+    def setUp(self):
+        super().setUp()
+        ig._CAPS_CACHE.clear()
+        self.addCleanup(ig._CAPS_CACHE.clear)
+
+    def _b64_payload(self):
+        raw = _png_bytes()
+        return {"candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "image/png",
+                            "data": base64.b64encode(raw).decode()}}]}}]}
+
+    def _call(self, **over):
+        params = {"api_key": "k", "model": "gemini-2.5-flash-image",
+                  "prompt": "p", "aspect_ratio": "21:9", "resolution": "2K",
+                  "references": [], "output_format": "png", "seed": None,
+                  "count": 1, "timeout_s": 5}
+        params.update(over)
+        return ig.request_gemini(**params)
+
+    def test_generate_content_body_and_parse(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            return 200, json.dumps(self._b64_payload())
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(count=2)
+        self.assertIn(":generateContent", urls[0])
+        # generateContent yields one image per call -> fan-out.
+        self.assertEqual(len(bodies), 2)
+        config = bodies[0]["generationConfig"]
+        self.assertEqual(config["responseModalities"], ["TEXT", "IMAGE"])
+        self.assertEqual(config["imageConfig"]["aspectRatio"], "16:9")  # closest
+        self.assertEqual(config["imageConfig"]["imageSize"], "2K")
+        self.assertEqual(payload["data"][0]["media_type"], "image/png")
+        self.assertEqual(len(payload["data"]), 2)
+
+    def test_references_become_inline_data(self):
+        raw = _png_bytes()
+        url = f"data:image/png;base64,{base64.b64encode(raw).decode()}"
+        bodies: list[dict] = []
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            return 200, json.dumps(self._b64_payload())
+
+        refs = [{"type": "image_url", "image_url": {"url": url}}]
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            self._call(references=refs)
+        parts = bodies[0]["contents"][0]["parts"]
+        self.assertEqual(parts[0], {"text": "p"})
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+
+    def test_imagen_predict_uses_seed_and_count(self):
+        bodies: list[dict] = []
+        urls: list[str] = []
+        raw = _png_bytes()
+
+        def fake_post(url, body, headers, timeout_s, cancel_event=None):
+            bodies.append(body)
+            urls.append(url)
+            n = body["parameters"]["sampleCount"]
+            return 200, json.dumps({"predictions": [
+                {"bytesBase64Encoded": base64.b64encode(raw).decode(),
+                 "mimeType": "image/png"} for _ in range(n)]})
+
+        with mock.patch.object(ig, "_post_json", side_effect=fake_post):
+            payload, _ts, _el = self._call(model="imagen-4.0-generate-001",
+                                           seed=5, count=2)
+        self.assertIn(":predict", urls[0])
+        self.assertEqual(len(bodies), 1)  # sampleCount covers count=2
+        self.assertEqual(bodies[0]["parameters"]["sampleCount"], 2)
+        self.assertEqual(bodies[0]["parameters"]["seed"], 5)
+        self.assertEqual(len(payload["data"]), 2)
+
+    def test_imagen_references_rejected_informatively(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call(model="imagen-4.0-generate-001",
+                       references=[{"type": "image_url"}])
+        self.assertIn("não aceita imagens de referência", str(ctx.exception))
+
+    def test_safety_block_becomes_content_policy_error(self):
+        raw = json.dumps({"promptFeedback": {"blockReason": "SAFETY"}})
+        with mock.patch.object(ig, "_post_json", return_value=(200, raw)):
+            with self.assertRaises(ig.ContentPolicyError) as ctx:
+                self._call()
+        self.assertIn("Google", str(ctx.exception))
+
+    def test_unknown_family_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._call(model="something-else-1")
+        self.assertIn("não parece ser do provider", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +1364,7 @@ class CsvLogTest(IsolatedEnvMixin):
     def test_log_fields_stable(self):
         self.assertEqual(ig.LOG_FIELDS, [
             "date", "prompt_summary", "prompt_full", "image_file", "image_bytes",
-            "width", "height", "resolution_req", "aspect_ratio_req", "cost_usd",
+            "width", "height", "resolution_req", "aspect_ratio_req", "seed", "cost_usd",
             "generation_timestamp", "total_seconds", "model", "provider", "key_hash",
         ])
 
@@ -996,6 +1453,51 @@ class RunGenerationTest(IsolatedEnvMixin):
         result = ig.run_generation(**_dry_kwargs(out, api_key="my-key"))
         row = ig.read_log_rows(Path(result["log_path"]))[0]
         self.assertEqual(row["key_hash"], ig.key_hash("my-key"))
+
+    def test_dry_run_records_requested_seed(self):
+        _, out = self.make_dirs()
+        result = ig.run_generation(**_dry_kwargs(out, seed=42, count=2))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual([r["seed"] for r in rows], ["42", "42"])
+
+    def test_dry_run_empty_seed_logged_blank(self):
+        _, out = self.make_dirs()
+        result = ig.run_generation(**_dry_kwargs(out, seed=None))
+        row = ig.read_log_rows(Path(result["log_path"]))[0]
+        self.assertEqual(row["seed"], "")
+
+    def test_mocked_remote_logs_effective_seeds_per_image(self):
+        _, out = self.make_dirs()
+        raw = _png_bytes()
+        payload = {"data": [{"b64_json": base64.b64encode(raw).decode()}
+                            for _ in range(3)],
+                   "usage": {"cost": 0.03}, "created": 1700000000,
+                   "seeds": [7, 8, 9]}
+
+        def fake_request(**kwargs):
+            return payload, 0.0, 0.1
+
+        with mock.patch.dict(ig.REQUEST_FUNCS, {"openrouter": fake_request}):
+            result = ig.run_generation(
+                **_dry_kwargs(out, dry_run=False, api_key="k", count=3,
+                              seed=7))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual([r["seed"] for r in rows], ["7", "8", "9"])
+
+    def test_mocked_remote_without_seeds_falls_back_to_base(self):
+        _, out = self.make_dirs()
+        raw = _png_bytes()
+        payload = {"data": [{"b64_json": base64.b64encode(raw).decode()}],
+                   "usage": {}, "created": 1700000000}
+
+        def fake_request(**kwargs):
+            return payload, 0.0, 0.1
+
+        with mock.patch.dict(ig.REQUEST_FUNCS, {"openrouter": fake_request}):
+            result = ig.run_generation(
+                **_dry_kwargs(out, dry_run=False, api_key="k", seed=11))
+        rows = ig.read_log_rows(Path(result["log_path"]))
+        self.assertEqual(rows[0]["seed"], "11")
 
     def test_missing_key_non_dry_run(self):
         _, out = self.make_dirs()
@@ -1088,6 +1590,483 @@ class RunGenerationBatchTest(IsolatedEnvMixin):
         self.assertEqual(seen_counts, [1, 1])
         self.assertEqual(len(result["images"]), 2)
         self.assertEqual(len(result["entries"]), 2)
+
+
+class LogOrderProgressTest(IsolatedEnvMixin):
+
+    def _row(self, date: str, name: str) -> dict:
+        row = {k: "" for k in ig.LOG_FIELDS}
+        row.update(date=date, image_file=name)
+        return row
+
+    def test_sort_newest_first(self):
+        rows = [self._row("2026-09-28T10:00:00-03:00", "a"),
+                self._row("2026-09-28T12:00:00-03:00", "b"),
+                self._row("2026-09-28T11:00:00-03:00", "c"),
+                self._row("2026-09-28T12:00:00-03:00", "d"),  # tie: later row on top
+                self._row("garbage", "e")]
+        got = [r["image_file"] for r in ig.sort_log_rows_newest_first(rows)]
+        self.assertEqual(got, ["d", "b", "c", "a", "e"])
+
+    def test_sort_mixed_offsets(self):
+        rows = [self._row("2026-09-28T12:00:00+00:00", "utc_noon"),
+                self._row("2026-09-28T10:00:00-03:00", "brt_10")]  # = 13:00 UTC
+        got = [r["image_file"] for r in ig.sort_log_rows_newest_first(rows)]
+        self.assertEqual(got, ["brt_10", "utc_noon"])
+
+    def test_collect_merges_and_dedups(self):
+        tmp, out = self.make_dirs()
+        sub = out / "1"
+        sub.mkdir()
+        ig.write_log(out / ig.LOG_FILENAME, [self._row("2026-09-28T10:00:00-03:00", "old")])
+        ig.write_log(sub / ig.LOG_FILENAME, [self._row("2026-09-28T11:00:00-03:00", "new")])
+        got = ig.collect_log_rows([out / ig.LOG_FILENAME, sub / ig.LOG_FILENAME,
+                                   out / ig.LOG_FILENAME, out / "missing" / ig.LOG_FILENAME])
+        self.assertEqual([r["image_file"] for r in got], ["new", "old"])
+
+    def test_on_progress_called_per_generation_after_logging(self):
+        _, out = self.make_dirs()
+        calls = []
+
+        def on_progress(info):
+            rows = ig.collect_log_rows([Path(p) for p in info["log_paths"]])
+            calls.append((info["done"], info["total"], len(info["images"]), len(rows)))
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=3).items() if k != "prompt"}
+        ig.run_generation_batch(["hi"], dynamic_dirs={"output_dir": "3"},
+                                on_progress=on_progress, **kwargs)
+        self.assertEqual(calls, [(1, 3, 1, 1), (2, 3, 2, 2), (3, 3, 3, 3)])
+        calls.clear()
+        ig.run_generation_batch(["a cat", "a dog"], on_progress=on_progress, **kwargs)
+        self.assertEqual([c[:2] for c in calls], [(1, 2), (2, 2)])
+
+    def test_on_progress_not_forwarded_to_single_run(self):
+        _, out = self.make_dirs()
+        kwargs = {k: v for k, v in _dry_kwargs(out).items() if k != "prompt"}
+        result = ig.run_generation_batch(["hi"], on_progress=lambda info: None, **kwargs)
+        self.assertEqual(len(result["images"]), 1)
+
+
+class DynamicDirsTest(IsolatedEnvMixin):
+
+    def _base(self, root: Path, *names: str) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (root / name).mkdir(parents=True)
+        return root
+
+    def test_parse_dynamic_range(self):
+        self.assertEqual(ig.parse_dynamic_range("2"), 2)
+        self.assertEqual(ig.parse_dynamic_range(" 10 "), 10)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            ig.parse_dynamic_range("")
+        for bad in ["0", "1", "-3", "abc", "1.5", None]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_range(bad)
+
+    def test_dynamic_dir_for_cycles(self):
+        got = [Path(ig.dynamic_dir_for("/a/b", 5, i)).name for i in range(10)]
+        self.assertEqual(got, ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"])
+
+    def test_dynamic_start(self):
+        self.assertEqual(ig.parse_dynamic_start(""), 1)
+        self.assertEqual(ig.parse_dynamic_start(None), 1)
+        self.assertEqual(ig.parse_dynamic_start(" 4 "), 4)
+        for bad in ["0", "-1", "x", "1.5"]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_start(bad)
+        self.assertEqual(ig.parse_dynamic_spec("5"), (1, 5, 1))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "", "range": "5"}), (1, 5, 1))
+        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12"}), (2, 12, 1))
+        for bad in ({"start": "5", "range": "5"}, {"start": "6", "range": "5"},
+                    {"start": "2", "range": ""}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_spec(bad)
+        got = [Path(ig.dynamic_dir_for("/a", 5, i, 2)).name for i in range(6)]
+        self.assertEqual(got, ["2", "3", "4", "5", "2", "3"])
+
+    def test_batch_resume_from_start(self):
+        # memory Start 2, Range 12, n=11: folders 2..12, memory/1 untouched.
+        tmp, out = self.make_dirs()
+        mem = self._base(Path(tmp.name) / "mem", *[str(i) for i in range(2, 13)])
+        seen = []
+        real = ig.run_generation
+
+        def spy(*, prompt, **kwargs):
+            seen.append(Path(kwargs["memory_dir"]).name)
+            return real(prompt=prompt, **kwargs)
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=11, memory_dir=str(mem)).items()
+                  if k != "prompt"}
+        with mock.patch.object(ig, "run_generation", side_effect=spy):
+            ig.run_generation_batch(["hi"], dynamic_dirs={
+                "memory_dir": {"start": "2", "range": "12"}}, **kwargs)
+        self.assertEqual(seen, [str(i) for i in range(2, 13)])
+
+    def test_check_requires_count_and_base(self):
+        tmp, out = self.make_dirs()
+        with self.assertRaisesRegex(ValueError, "count > 1"):
+            ig.check_dynamic_dirs({"output_dir": "3"}, {"output_dir": str(out)}, 1)
+        with self.assertRaisesRegex(ValueError, "base folder"):
+            ig.check_dynamic_dirs({"context_dir": "3"}, {"context_dir": ""}, 3)
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            ig.check_dynamic_dirs({"foo": "3"}, {}, 3)
+
+    def test_batch_user_example_folders(self):
+        # batch 3, start 2, range 12: 1-3 -> 2, 4-6 -> 3, 7-9 -> 4, ...
+        got = [Path(ig.dynamic_dir_for("/a", 12, i, 2, 3)).name for i in range(12)]
+        self.assertEqual(got, ["2"] * 3 + ["3"] * 3 + ["4"] * 3 + ["5"] * 3)
+        # past range the cycle restarts at start (batch 2, folders 1..3)
+        got = [Path(ig.dynamic_dir_for("/a", 3, i, 1, 2)).name for i in range(8)]
+        self.assertEqual(got, ["1", "1", "2", "2", "3", "3", "1", "1"])
+        # batch 1 == previous behaviour
+        self.assertEqual([Path(ig.dynamic_dir_for("/a", 5, i, 2)).name for i in range(5)],
+                         ["2", "3", "4", "5", "2"])
+
+    def test_parse_dynamic_batch(self):
+        self.assertEqual(ig.parse_dynamic_batch(""), 1)
+        self.assertEqual(ig.parse_dynamic_batch(None), 1)
+        self.assertEqual(ig.parse_dynamic_batch(" 3 "), 3)
+        for bad in ["0", "-1", "x", "1.5"]:
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ig.parse_dynamic_batch(bad)
+        self.assertEqual(ig.parse_dynamic_spec({"start": "2", "range": "12", "batch": "3"}),
+                         (2, 12, 3))
+        with self.assertRaisesRegex(ValueError, "batch"):
+            ig.parse_dynamic_spec({"range": "5", "batch": "0"})
+
+    def test_batch_needs_only_the_folders_it_uses(self):
+        tmp, _ = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "2", "3")
+        # 6 generations, batch 3 -> folders 2 and 3 only (range 12 not required)
+        self.assertEqual(ig.check_dynamic_dirs({"context_dir": {"start": "2", "range": "12",
+                                                                "batch": "3"}},
+                                               {"context_dir": str(ctx)}, 6),
+                         {"context_dir": (2, 12, 3)})
+        with self.assertRaisesRegex(FileNotFoundError, r"ctx/4"):
+            ig.check_dynamic_dirs({"context_dir": {"start": "2", "range": "12", "batch": "3"}},
+                                  {"context_dir": str(ctx)}, 7)
+
+    def test_batch_run_and_cli(self):
+        _, out = self.make_dirs()
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=7).items() if k != "prompt"}
+        result = ig.run_generation_batch(
+            ["hi"], dynamic_dirs={"output_dir": {"start": "2", "range": "12", "batch": "3"}},
+            **kwargs)
+        self.assertEqual([Path(p).parent.name for p in result["images"]],
+                         ["2", "2", "2", "3", "3", "3", "4"])
+        _, out2 = self.make_dirs()
+        args = MainCliTest._args(self, out2, count=4, dynamic_output="5",
+                                 dynamic_output_batch="2")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(ig.main_cli(args), 0)
+        self.assertEqual(sorted(p.name for p in out2.iterdir() if p.is_dir()), ["1", "2"])
+        parsed = ig.build_parser().parse_args(["--dynamic-memory", "9",
+                                               "--dynamic-memory-batch", "4"])
+        self.assertEqual(parsed.dynamic_memory_batch, "4")
+
+    def test_check_missing_context_subfolders(self):
+        tmp, _ = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "1", "2")
+        # count 2 only needs 1..2 -> ok even with range 10
+        self.assertEqual(ig.check_dynamic_dirs({"context_dir": "10"},
+                                               {"context_dir": str(ctx)}, 2),
+                         {"context_dir": (1, 10, 1)})
+        with self.assertRaisesRegex(FileNotFoundError, "3"):
+            ig.check_dynamic_dirs({"context_dir": "10"}, {"context_dir": str(ctx)}, 3)
+
+    def test_batch_user_example(self):
+        # n=10, context Dynamic range 10, output Dynamic range 5, memory fixed.
+        tmp, out = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", *[str(i) for i in range(1, 11)])
+        for i in range(1, 11):
+            (ctx / str(i) / "c.md").write_text(f"ctx {i}", encoding="utf-8")
+        mem = self._base(Path(tmp.name) / "mem")
+        seen = []
+        real = ig.run_generation
+
+        def spy(*, prompt, **kwargs):
+            seen.append((kwargs["count"], kwargs["seed"], Path(kwargs["context_dir"]).name,
+                         Path(kwargs["output_dir"]).name, kwargs["memory_dir"]))
+            return real(prompt=prompt, **kwargs)
+
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=10, seed=7, context_dir=str(ctx),
+                                               memory_dir=str(mem)).items() if k != "prompt"}
+        with mock.patch.object(ig, "run_generation", side_effect=spy):
+            result = ig.run_generation_batch(
+                ["hello"], dynamic_dirs={"context_dir": "10", "output_dir": "5"}, **kwargs)
+        self.assertEqual([s[2] for s in seen], [str(i) for i in range(1, 11)])
+        self.assertEqual([s[3] for s in seen], ["1", "2", "3", "4", "5"] * 2)
+        self.assertEqual({s[4] for s in seen}, {str(mem)})
+        self.assertEqual({s[0] for s in seen}, {1})
+        self.assertEqual([s[1] for s in seen], list(range(7, 17)))
+        self.assertEqual(len(result["images"]), 10)
+        self.assertEqual(len(result["log_paths"]), 5)
+        for i in range(1, 6):
+            self.assertEqual(len(list((out / str(i)).glob("image_*.png"))), 2)
+            self.assertEqual(len(ig.read_log_rows(out / str(i) / ig.LOG_FILENAME)), 2)
+
+    def test_batch_missing_subfolder_runs_nothing(self):
+        tmp, out = self.make_dirs()
+        ctx = self._base(Path(tmp.name) / "ctx", "1")
+        kwargs = {k: v for k, v in _dry_kwargs(out, count=3, context_dir=str(ctx)).items()
+                  if k != "prompt"}
+        with mock.patch.object(ig, "run_generation") as run:
+            with self.assertRaises(FileNotFoundError):
+                ig.run_generation_batch(["hi"], dynamic_dirs={"context_dir": "3"}, **kwargs)
+        run.assert_not_called()
+
+    def test_nearest_existing_dir(self):
+        tmp, out = self.make_dirs()
+        self.assertEqual(ig.nearest_existing_dir(str(out)), out)
+        self.assertEqual(ig.nearest_existing_dir(str(out / "x" / "y")), out)
+        self.assertIsNone(ig.nearest_existing_dir(""))
+        self.assertIsNone(ig.nearest_existing_dir(None))
+
+    def test_cli_dynamic_output(self):
+        _, out = self.make_dirs()
+        args = MainCliTest._args(self, out, count=3, dynamic_output="2")
+        with redirect_stdout(io.StringIO()):
+            code = ig.main_cli(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((out / "1").glob("image_*.png"))), 2)
+        self.assertEqual(len(list((out / "2").glob("image_*.png"))), 1)
+
+    def test_cli_dynamic_errors(self):
+        _, out = self.make_dirs()
+        for over in ({"count": 1, "dynamic_output": "2"},
+                     {"count": 3, "dynamic_output": ""},
+                     {"count": 3, "dynamic_context": "2"}):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                code = ig.main_cli(MainCliTest._args(self, out, **over))
+            self.assertEqual(code, 2, over)
+
+    def test_parser_flags(self):
+        args = ig.build_parser().parse_args(["--dynamic-output", "5", "--dynamic-memory", "3",
+                                             "--dynamic-memory-start", "2"])
+        self.assertEqual((args.dynamic_output, args.dynamic_context, args.dynamic_memory),
+                         ("5", None, "3"))
+        self.assertEqual((args.dynamic_output_start, args.dynamic_memory_start), (None, "2"))
+
+    def test_cli_dynamic_output_start(self):
+        _, out = self.make_dirs()
+        args = MainCliTest._args(self, out, count=3, dynamic_output="4",
+                                 dynamic_output_start="3")
+        with redirect_stdout(io.StringIO()):
+            code = ig.main_cli(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((out / "3").glob("image_*.png"))), 2)
+        self.assertEqual(len(list((out / "4").glob("image_*.png"))), 1)
+        self.assertFalse((out / "1").exists())
+        # start without range -> range empty error
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = ig.main_cli(MainCliTest._args(self, out, count=3, dynamic_output_start="2"))
+        self.assertEqual(code, 2)
+
+
+class AnalyseTest(IsolatedEnvMixin):
+    """Analyse tab core: aligned rows, one pick per row, Choose copy + report."""
+
+    def folder(self, name: str, count: int, start: float = 1_700_000_000) -> Path:
+        tmp, _ = self.make_dirs()
+        folder = Path(tmp.name) / name
+        folder.mkdir()
+        for i in range(count):  # file i is newer than file i-1
+            path = folder / f"img_{i}.png"
+            ig.write_placeholder_png(path, 20 + i, 10)
+            os.utime(path, (start + i * 10, start + i * 10))
+        (folder / "notes.txt").write_text("not an image")
+        return folder
+
+    def test_rows_newest_and_oldest_first(self):
+        a, b = self.folder("A", 3), self.folder("B", 2)
+        rows = ig.build_analysis_rows([a, b])
+        self.assertEqual([[c.name if c else None for c in r] for r in rows],
+                         [["img_2.png", "img_1.png"], ["img_1.png", "img_0.png"],
+                          ["img_0.png", None]])
+        rows = ig.build_analysis_rows([a, b], newest_first=False)
+        self.assertEqual([[c.name if c else None for c in r] for r in rows],
+                         [["img_0.png", "img_0.png"], ["img_1.png", "img_1.png"],
+                          ["img_2.png", None]])
+        with self.assertRaises(FileNotFoundError):
+            ig.build_analysis_rows([a, a / "missing"])
+
+    def test_choose_copies_and_reports(self):
+        a, b = self.folder("A", 3), self.folder("B", 2)
+        ig.write_log(b / ig.LOG_FILENAME, [{**{k: "" for k in ig.LOG_FIELDS},
+                                            "image_file": "img_1.png", "prompt_full": "a cat",
+                                            "model": "m/x", "seed": "7", "date": "2026-09-28"}])
+        tmp, _ = self.make_dirs()
+        result = ig.choose_images([a, b], {0: 1, 2: 0}, Path(tmp.name) / "chosen")
+        dest = Path(result["folder"])
+        self.assertEqual(dest.parent, Path(tmp.name) / "chosen")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()),
+                         ["1_B_img_1.png", "3_A_img_0.png", "report.csv", "report.md"])
+        self.assertTrue((b / "img_1.png").is_file())  # originals untouched
+        rows = list(csv.DictReader((dest / "report.csv").open(encoding="utf-8")))
+        self.assertEqual([r["row"] for r in rows], ["1", "3"])
+        self.assertEqual(rows[0]["prompt_full"], "a cat")
+        self.assertEqual(rows[0]["seed"], "7")
+        self.assertEqual(rows[0]["alternatives"], "A/img_2.png")
+        self.assertEqual(rows[1]["alternatives"], "")  # B has no 3rd image
+        md = (dest / "report.md").read_text(encoding="utf-8")
+        self.assertIn("Rows compared: 3; chosen: 2; rows without a choice: 1", md)
+        self.assertIn("| 2 | `" + str(b) + "` | 2 | 1 | 50% |", md)
+        self.assertIn("- Prompt: a cat", md)
+        self.assertIn("No generation info", md)  # A has no log
+        again = ig.choose_images([a, b], {0: 0}, Path(tmp.name) / "chosen")
+        self.assertNotEqual(again["folder"], result["folder"])  # never overwrites
+
+    def test_report_finds_log_in_parent_folder(self):
+        tmp, _ = self.make_dirs()
+        sub = Path(tmp.name) / "generated" / "muse 1"
+        sub.mkdir(parents=True)
+        ig.write_placeholder_png(sub / "image_1.png", 10, 10)
+        ig.write_log(sub.parent / ig.LOG_FILENAME, [{**{k: "" for k in ig.LOG_FIELDS},
+                                                    "image_file": "image_1.png",
+                                                    "prompt_full": "from parent log"}])
+        result = ig.choose_images([sub], {0: 0}, Path(tmp.name) / "chosen")
+        self.assertEqual(result["rows"][0]["prompt_full"], "from parent log")
+
+    def test_choose_validation(self):
+        a, b = self.folder("A", 2), self.folder("B", 1)
+        tmp, _ = self.make_dirs()
+        for picks, msg in (({}, "no image selected"), ({1: 1}, "no image in column 2"),
+                           ({5: 0}, "out of range"), ({0: 3}, "out of range")):
+            with self.assertRaisesRegex(ValueError, msg):
+                ig.choose_images([a, b], picks, tmp.name)
+
+    def test_parse_pick(self):
+        self.assertEqual(ig.parse_pick("3:2", 2), (2, 1))
+        for bad in ("3", "0:1", "1:3", "a:b", "1:0"):
+            with self.assertRaises(ValueError, msg=bad):
+                ig.parse_pick(bad, 2)
+
+    def test_cli_analyse_and_choose(self):
+        a, b = self.folder("A", 2), self.folder("B", 2)
+        tmp, _ = self.make_dirs()
+        with redirect_stdout(io.StringIO()) as out:
+            code = ig.main(["--analyse", str(a), "--analyse", str(b)])
+        self.assertEqual(code, 0)
+        self.assertIn("  1  img_1.png  |  img_1.png", out.getvalue())
+        with redirect_stdout(io.StringIO()) as out:
+            code = ig.main(["--analyse", str(a), "--analyse", str(b), "--choose", "1:2",
+                            "--choose", "2:1", "--oldest-first", "--chosen-dir", tmp.name])
+        self.assertEqual(code, 0)
+        dest = Path(out.getvalue().split("to ", 1)[1].splitlines()[0])
+        self.assertEqual(sorted(p.name for p in dest.glob("*.png")),
+                         ["1_B_img_0.png", "2_A_img_1.png"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(ig.main(["--analyse", str(a), "--choose", "1:1",
+                                      "--choose", "1:1"]), 2)  # same row twice
+
+    def test_thumbnail_cache(self):
+        a = self.folder("A", 1)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(a / "cache")}):
+            thumb = ig.make_thumbnail(a / "img_0.png", size=16)
+            if thumb is None:
+                self.skipTest("no convert/ffmpeg available")
+            self.assertTrue(thumb.is_file())
+            self.assertEqual(ig.make_thumbnail(a / "img_0.png", size=16), thumb)  # cached
+
+    def test_preview_geometry(self):
+        # 1920x1080 screen, 1920x1280 image: big near the edges, on the wider side
+        self.assertEqual(ig.preview_geometry(1920, 1280, 200, 1920, 1080), (1200, "right"))
+        self.assertEqual(ig.preview_geometry(1920, 1280, 1700, 1920, 1080), (1200, "left"))
+        size, side = ig.preview_geometry(1920, 1280, 960, 1920, 1080)
+        self.assertEqual(side, "right")
+        self.assertLessEqual(size, 1920 - 960 - ig.PREVIEW_GAP)  # never over the pointer
+        self.assertEqual(size % ig.PREVIEW_STEP, 0)
+        # never upscaled past the image itself
+        self.assertEqual(ig.preview_geometry(300, 200, 100, 1920, 1080), (300, "right"))
+        # tall image limited by the screen height minus the caption
+        size, _ = ig.preview_geometry(1000, 3000, 100, 1920, 1080)
+        self.assertLessEqual(size, 1080 * 0.85 - ig.PREVIEW_CAPTION_H)
+
+    def test_default_chosen_dir_is_next_to_output_dir(self):
+        self.assertEqual(ig.default_chosen_dir("/p/generated/muse 2"), "/p/generated/chosen")
+        self.assertEqual(Path(ig.default_chosen_dir()).parent,
+                         Path(ig.default_output_dir()).parent)
+
+    def test_config_keeps_prompt(self):
+        ig.save_gui_config({"prompt": "um {{animal}}\nsegunda linha", "dry_run": True})
+        self.assertEqual(ig.sanitize_gui_config(ig.load_gui_config())["prompt"],
+                         "um {{animal}}\nsegunda linha")
+        self.assertEqual(ig.sanitize_gui_config({"prompt": 3})["prompt"], "")
+
+    def test_config_keeps_analyse_folders(self):
+        clean = ig.sanitize_gui_config({"analyse": ["/a", "", 3, "/b"], "chosen_dir": "/c"})
+        self.assertEqual((clean["analyse"], clean["chosen_dir"]), (["/a", "/b"], "/c"))
+        self.assertEqual(ig.sanitize_gui_config({"analyse": "x"})["analyse"], [])
+
+
+class TableViewTest(IsolatedEnvMixin):
+    """Per-column sort + spreadsheet filters shared by both GUIs and --list-log."""
+
+    ROWS = [{"model": "b/x", "cost_usd": "0.5", "date": "2026-09-28T10:00:00"},
+            {"model": "a/y", "cost_usd": "10", "date": "2026-09-27T09:00:00"},
+            {"model": "B/z", "cost_usd": "", "date": "2026-09-29T08:00:00"},
+            {"model": "a/y", "cost_usd": "2", "date": ""}]
+
+    def test_column_kind(self):
+        self.assertEqual(ig.column_kind(["1", "2.5", "", "$3"]), "num")
+        self.assertEqual(ig.column_kind(["2026-09-28T10:00", "2026-01-01"]), "date")
+        self.assertEqual(ig.column_kind(["abc", "1"]), "text")
+        self.assertEqual(ig.column_kind(["", " "]), "text")
+
+    def test_sort_numeric_text_date_and_empties_last(self):
+        cost = [r["cost_usd"] for r in ig.apply_table_view(self.ROWS, sort=("cost_usd", False))]
+        self.assertEqual(cost, ["0.5", "2", "10", ""])       # numeric, not "10" < "2"
+        cost = [r["cost_usd"] for r in ig.apply_table_view(self.ROWS, sort=("cost_usd", True))]
+        self.assertEqual(cost, ["10", "2", "0.5", ""])       # empty stays last
+        models = [r["model"] for r in ig.apply_table_view(self.ROWS, sort=("model", False))]
+        self.assertEqual(models, ["a/y", "a/y", "b/x", "B/z"])  # case-insensitive, stable
+        dates = [r["date"][:10] for r in ig.apply_table_view(self.ROWS, sort=("date", True))]
+        self.assertEqual(dates, ["2026-09-29", "2026-09-28", "2026-09-27", ""])
+
+    def test_filters_values_contains_and_combined(self):
+        only = ig.apply_table_view(self.ROWS, {"model": {"values": {"a/y"}, "contains": ""}})
+        self.assertEqual(len(only), 2)
+        contains = ig.apply_table_view(self.ROWS, {"model": {"values": None, "contains": "B/"}})
+        self.assertEqual([r["model"] for r in contains], ["b/x", "B/z"])
+        both = ig.apply_table_view(self.ROWS, {"model": {"values": {"a/y"}, "contains": ""},
+                                               "cost_usd": {"values": None, "contains": "2"}})
+        self.assertEqual([r["cost_usd"] for r in both], ["2"])
+        self.assertEqual(ig.apply_table_view(self.ROWS, {"model": {"values": set(),
+                                                                   "contains": ""}}), [])
+
+    def test_parse_sort_and_filters(self):
+        self.assertEqual(ig.parse_log_sort("cost_usd:desc"), ("cost_usd", True))
+        self.assertEqual(ig.parse_log_sort("model"), ("model", False))
+        self.assertIsNone(ig.parse_log_sort(""))
+        with self.assertRaises(ValueError):
+            ig.parse_log_sort("model:sideways")
+        self.assertEqual(ig.parse_log_filters(["model=muse"], ig.LOG_FIELDS),
+                         {"model": {"values": None, "contains": "muse"}})
+        with self.assertRaisesRegex(ValueError, "unknown column"):
+            ig.parse_log_filters(["nope=1"], ig.LOG_FIELDS)
+        with self.assertRaisesRegex(ValueError, "COLUMN=TEXT"):
+            ig.parse_log_filters(["model"], ig.LOG_FIELDS)
+
+    def test_cli_list_log_filter_sort(self):
+        _, out = self.make_dirs()
+        rows = [{**{k: "" for k in ig.LOG_FIELDS}, "image_file": f"i{i}.png", "model": m,
+                 "cost_usd": c} for i, (m, c) in enumerate([("a", "3"), ("b", "10"), ("a", "1")])]
+        ig.write_log(out / ig.LOG_FILENAME, rows)
+        with redirect_stdout(io.StringIO()) as buf:
+            code = ig.main(["--list-log", "--output-dir", str(out), "--log-filter", "model=a",
+                            "--log-sort", "cost_usd:desc"])
+        self.assertEqual(code, 0)
+        listed = list(csv.DictReader(io.StringIO(buf.getvalue())))
+        self.assertEqual([r["image_file"] for r in listed], ["i0.png", "i2.png"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(ig.main(["--list-log", "--output-dir", str(out),
+                                      "--log-sort", "x:bad"]), 2)
+
+    def test_config_keeps_log_sort(self):
+        self.assertEqual(ig.sanitize_gui_config({"log_sort": "cost_usd:desc"})["log_sort"],
+                         "cost_usd:desc")
+        self.assertEqual(ig.sanitize_gui_config({"log_sort": "a:sideways"})["log_sort"], "")
 
 
 # ---------------------------------------------------------------------------
