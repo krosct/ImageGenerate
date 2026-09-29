@@ -806,13 +806,14 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
 @media (max-width: 720px) { .voice-row { grid-template-columns: 1fr; } }
 
 .player .field-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.player-panes { display: grid; height: calc(100vh - 200px); min-height: 380px; }
-/* center column: storyboard stage + its transport controls, kept together */
-.player-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; justify-content: center; }
-.player-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+/* row 1: narrow story list | storyboard stage with the transport controls below */
+.player-top { display: grid; align-items: stretch; }
+.player-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
 .player-list-box {
   flex: 1;
   overflow: auto;
+  max-height: min(70vh, 720px);
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--panel-2);
@@ -821,6 +822,8 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
   padding: 6px 10px;
   font-size: 13px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   color: var(--text-secondary);
 }
@@ -835,6 +838,9 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
   background: var(--border-strong);
 }
 .splitter:hover::after { background: var(--accent-blue); }
+
+/* center column: storyboard stage + its transport controls, kept together */
+.player-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
 .player-stage {
   position: relative;
   overflow: hidden;
@@ -852,7 +858,7 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
   display: block;
   width: 100%;
   height: auto;
-  max-height: calc(100vh - 340px);
+  max-height: min(70vh, 720px);
   object-fit: contain;
   transform-origin: center center;
   pointer-events: none;
@@ -868,28 +874,38 @@ table.analyse-grid th { position: sticky; top: 0; background: var(--panel); font
   border-radius: 6px;
   pointer-events: none;
 }
+.player-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.player-controls .seek { flex: 1; min-width: 160px; accent-color: var(--accent-blue); }
+.player-controls .time { font-family: var(--font-mono); font-size: 12px; min-width: 96px; text-align: right; }
+.scene-line { margin-top: 0; text-align: center; }
+
+/* row 2: script full width — title, subtitle, horizontal scene cards, voice */
 .player-script {
-  overflow: auto;
-  padding: 4px 12px;
+  margin-top: 14px;
+  padding: 0 2px;
   font-size: 14px;
   line-height: 1.55;
   min-width: 0;
 }
 .player-script h2 { margin: 0 0 6px; font-size: 20px; }
 .player-script .logline { font-style: italic; color: var(--text-secondary); margin: 0 0 10px; }
-.player-script .scene { padding: 6px 8px; border-radius: 8px; cursor: pointer; }
-.player-script .scene:hover { background: var(--panel-2); }
-.player-script .scene-current { background: rgba(255, 243, 176, 0.14); }
+.player-script .scene-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+.player-script .scene {
+  flex: 0 0 300px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.player-script .scene:hover { background: var(--panel-3); }
+.player-script .scene-current { background: rgba(255, 243, 176, 0.14); border-color: rgba(255, 243, 176, 0.5); }
 .player-script .scene-heading { font-weight: 700; margin-bottom: 2px; }
 .player-script .voice-line { color: var(--text-secondary); margin-top: 12px; }
-.player-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.player-controls .seek { flex: 1; min-width: 160px; accent-color: var(--accent-blue); }
-.player-controls .time { font-family: var(--font-mono); font-size: 12px; min-width: 96px; text-align: right; }
-.scene-line { margin-top: 0; text-align: center; }
 @media (max-width: 860px) {
-  .player-panes { grid-template-columns: 1fr !important; height: auto; }
+  .player-top { grid-template-columns: 1fr !important; }
   .splitter { display: none; }
   .player-list-box { max-height: 180px; }
-  .player-main { justify-content: flex-start; }
   .player-stage img { max-height: 50vh; }
+  .player-script .scene { flex-basis: 240px; }
 }
