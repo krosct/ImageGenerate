@@ -2000,6 +2000,75 @@ class AnalyseTest(IsolatedEnvMixin):
         self.assertEqual(ig.sanitize_gui_config({"analyse": "x"})["analyse"], [])
 
 
+class TableViewTest(IsolatedEnvMixin):
+    """Per-column sort + spreadsheet filters shared by both GUIs and --list-log."""
+
+    ROWS = [{"model": "b/x", "cost_usd": "0.5", "date": "2026-09-28T10:00:00"},
+            {"model": "a/y", "cost_usd": "10", "date": "2026-09-27T09:00:00"},
+            {"model": "B/z", "cost_usd": "", "date": "2026-09-29T08:00:00"},
+            {"model": "a/y", "cost_usd": "2", "date": ""}]
+
+    def test_column_kind(self):
+        self.assertEqual(ig.column_kind(["1", "2.5", "", "$3"]), "num")
+        self.assertEqual(ig.column_kind(["2026-09-28T10:00", "2026-01-01"]), "date")
+        self.assertEqual(ig.column_kind(["abc", "1"]), "text")
+        self.assertEqual(ig.column_kind(["", " "]), "text")
+
+    def test_sort_numeric_text_date_and_empties_last(self):
+        cost = [r["cost_usd"] for r in ig.apply_table_view(self.ROWS, sort=("cost_usd", False))]
+        self.assertEqual(cost, ["0.5", "2", "10", ""])       # numeric, not "10" < "2"
+        cost = [r["cost_usd"] for r in ig.apply_table_view(self.ROWS, sort=("cost_usd", True))]
+        self.assertEqual(cost, ["10", "2", "0.5", ""])       # empty stays last
+        models = [r["model"] for r in ig.apply_table_view(self.ROWS, sort=("model", False))]
+        self.assertEqual(models, ["a/y", "a/y", "b/x", "B/z"])  # case-insensitive, stable
+        dates = [r["date"][:10] for r in ig.apply_table_view(self.ROWS, sort=("date", True))]
+        self.assertEqual(dates, ["2026-09-29", "2026-09-28", "2026-09-27", ""])
+
+    def test_filters_values_contains_and_combined(self):
+        only = ig.apply_table_view(self.ROWS, {"model": {"values": {"a/y"}, "contains": ""}})
+        self.assertEqual(len(only), 2)
+        contains = ig.apply_table_view(self.ROWS, {"model": {"values": None, "contains": "B/"}})
+        self.assertEqual([r["model"] for r in contains], ["b/x", "B/z"])
+        both = ig.apply_table_view(self.ROWS, {"model": {"values": {"a/y"}, "contains": ""},
+                                               "cost_usd": {"values": None, "contains": "2"}})
+        self.assertEqual([r["cost_usd"] for r in both], ["2"])
+        self.assertEqual(ig.apply_table_view(self.ROWS, {"model": {"values": set(),
+                                                                   "contains": ""}}), [])
+
+    def test_parse_sort_and_filters(self):
+        self.assertEqual(ig.parse_log_sort("cost_usd:desc"), ("cost_usd", True))
+        self.assertEqual(ig.parse_log_sort("model"), ("model", False))
+        self.assertIsNone(ig.parse_log_sort(""))
+        with self.assertRaises(ValueError):
+            ig.parse_log_sort("model:sideways")
+        self.assertEqual(ig.parse_log_filters(["model=muse"], ig.LOG_FIELDS),
+                         {"model": {"values": None, "contains": "muse"}})
+        with self.assertRaisesRegex(ValueError, "unknown column"):
+            ig.parse_log_filters(["nope=1"], ig.LOG_FIELDS)
+        with self.assertRaisesRegex(ValueError, "COLUMN=TEXT"):
+            ig.parse_log_filters(["model"], ig.LOG_FIELDS)
+
+    def test_cli_list_log_filter_sort(self):
+        _, out = self.make_dirs()
+        rows = [{**{k: "" for k in ig.LOG_FIELDS}, "image_file": f"i{i}.png", "model": m,
+                 "cost_usd": c} for i, (m, c) in enumerate([("a", "3"), ("b", "10"), ("a", "1")])]
+        ig.write_log(out / ig.LOG_FILENAME, rows)
+        with redirect_stdout(io.StringIO()) as buf:
+            code = ig.main(["--list-log", "--output-dir", str(out), "--log-filter", "model=a",
+                            "--log-sort", "cost_usd:desc"])
+        self.assertEqual(code, 0)
+        listed = list(csv.DictReader(io.StringIO(buf.getvalue())))
+        self.assertEqual([r["image_file"] for r in listed], ["i0.png", "i2.png"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(ig.main(["--list-log", "--output-dir", str(out),
+                                      "--log-sort", "x:bad"]), 2)
+
+    def test_config_keeps_log_sort(self):
+        self.assertEqual(ig.sanitize_gui_config({"log_sort": "cost_usd:desc"})["log_sort"],
+                         "cost_usd:desc")
+        self.assertEqual(ig.sanitize_gui_config({"log_sort": "a:sideways"})["log_sort"], "")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

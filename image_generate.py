@@ -338,6 +338,7 @@ CONFIG_KEYS = (
     "analyse",
     "chosen_dir",
     "prompt",
+    "log_sort",
 )
 
 
@@ -399,6 +400,11 @@ def sanitize_gui_config(data: dict) -> dict:
     clean["chosen_dir"] = str(data.get("chosen_dir", "") or "")
     prompt = data.get("prompt", "")
     clean["prompt"] = prompt if isinstance(prompt, str) else ""
+    try:
+        clean["log_sort"] = str(data.get("log_sort") or "") if parse_log_sort(
+            str(data.get("log_sort") or "")) else ""
+    except ValueError:
+        clean["log_sort"] = ""
     return clean
 
 
@@ -2202,6 +2208,326 @@ def analysis_report_markdown(folders: list[Path], rows: list[list[Path | None]],
 
 
 # ---------------------------------------------------------------------------
+# Log tables: per-column sort + spreadsheet-like filters (GUI lists and CLI)
+# ---------------------------------------------------------------------------
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def column_kind(values: list[str]) -> str:
+    """"num" when every non-empty value is a number, "date" for ISO dates,
+    else "text" - decides how a column sorts."""
+    present = [v.strip() for v in values if str(v).strip()]
+    if not present:
+        return "text"
+    try:
+        for v in present:
+            float(v.replace("$", "").replace(",", ""))
+        return "num"
+    except ValueError:
+        pass
+    return "date" if all(_DATE_RE.match(v) for v in present) else "text"
+
+
+def sort_key(value: str, kind: str) -> tuple:
+    """Key for one cell; empty cells always go last (in both directions via
+    the caller)."""
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0, "")
+    if kind == "num":
+        try:
+            return (0, float(text.replace("$", "").replace(",", "")), "")
+        except ValueError:
+            return (0, float("inf"), text.casefold())
+    return (0, 0, text.casefold())
+
+
+def apply_table_view(rows: list[dict], filters: dict[str, dict] | None = None,
+                     sort: tuple[str, bool] | None = None) -> list[dict]:
+    """Filter + sort rows (dicts of column -> text).
+
+    filters: {column: {"values": set of allowed texts or None (= all),
+    "contains": case-insensitive substring}}; sort: (column, descending).
+    Rows keep their original order for equal keys; empty cells sort last.
+    """
+    result = []
+    for row in rows:
+        keep = True
+        for col, rule in (filters or {}).items():
+            cell = str(row.get(col, "") or "")
+            allowed = rule.get("values")
+            if allowed is not None and cell not in allowed:
+                keep = False
+                break
+            needle = str(rule.get("contains") or "").strip().casefold()
+            if needle and needle not in cell.casefold():
+                keep = False
+                break
+        if keep:
+            result.append(row)
+    if sort and sort[0]:
+        col, descending = sort
+        kind = column_kind([str(r.get(col, "") or "") for r in result])
+        filled = [r for r in result if str(r.get(col, "") or "").strip()]
+        empty = [r for r in result if not str(r.get(col, "") or "").strip()]
+        filled.sort(key=lambda r: sort_key(str(r.get(col, "")), kind), reverse=descending)
+        result = filled + empty
+    return result
+
+
+def parse_log_sort(spec: str | None) -> tuple[str, bool] | None:
+    """"COLUMN" or "COLUMN:asc|desc" -> (column, descending)."""
+    text = str(spec or "").strip()
+    if not text:
+        return None
+    col, _, direction = text.partition(":")
+    direction = direction.strip().lower() or "asc"
+    if not col.strip() or direction not in ("asc", "desc"):
+        raise ValueError(f"invalid sort {spec!r} (use COLUMN or COLUMN:desc)")
+    return col.strip(), direction == "desc"
+
+
+def parse_log_filters(specs: list[str] | None, columns: list[str]) -> dict[str, dict]:
+    """["COLUMN=TEXT", ...] -> filters for apply_table_view: the column must
+    contain TEXT (case-insensitive). Several columns combine (AND); the same
+    column given twice keeps the last one."""
+    filters: dict[str, dict] = {}
+    for spec in specs or []:
+        col, sep, text = spec.partition("=")
+        col = col.strip()
+        if not sep or not col:
+            raise ValueError(f"invalid filter {spec!r} (use COLUMN=TEXT)")
+        if col not in columns:
+            raise ValueError(f"unknown column {col!r} (columns: {', '.join(columns)})")
+        filters[col] = {"values": None, "contains": text}
+    return filters
+
+
+class TreeTable:
+    """Sort (click a heading) + spreadsheet-like filter (right-click a heading)
+    for a ttk.Treeview. Rows are set with set_items(); each item is a dict
+    {"values": tuple of cell texts, "tags": tuple, "payload": anything,
+    "sort": optional tuple of per-column sort texts}. payload_of(item_id)
+    gives back the payload of a shown row (the tree order changes)."""
+
+    MAX_VALUES = 300  # distinct values listed in a filter popup
+
+    def __init__(self, root, tree, columns: list[str], headings: dict[str, str],
+                 on_render=None, sort: tuple[str, bool] | None = None,
+                 on_sort_change=None) -> None:
+        self.root, self.tree = root, tree
+        self.columns = list(columns)
+        self.headings = dict(headings)
+        self.on_render = on_render
+        self.on_sort_change = on_sort_change
+        self.items: list[dict] = []
+        self.filters: dict[str, dict] = {}
+        self.sort = sort if sort and sort[0] in self.columns else None
+        self.payloads: dict[str, object] = {}
+        self.shown = 0
+        for col in self.columns:
+            tree.heading(col, command=lambda c=col: self.toggle_sort(c))
+        self._paint_headings()
+
+    # -- data ------------------------------------------------------------
+    def _rows(self) -> list[dict]:
+        rows = []
+        for index, item in enumerate(self.items):
+            row = {col: str(v) for col, v in zip(self.columns, item["values"])}
+            row["\0index"] = index
+            rows.append(row)
+        return rows
+
+    def set_items(self, items: list[dict]) -> None:
+        self.items = list(items)
+        self.render()
+
+    def render(self) -> None:
+        tree = self.tree
+        for child in tree.get_children():
+            tree.delete(child)
+        self.payloads.clear()
+        rows = apply_table_view(self._rows(), self.filters, None)
+        if self.sort:
+            col, descending = self.sort
+            idx = self.columns.index(col)
+            view = []
+            for row in rows:
+                item = self.items[row["\0index"]]
+                key_src = item.get("sort") or item["values"]
+                view.append({col: str(key_src[idx]), "\0index": row["\0index"]})
+            rows = apply_table_view(view, None, self.sort)
+        for row in rows:
+            item = self.items[row["\0index"]]
+            iid = tree.insert("", "end", values=tuple(item["values"]),
+                              tags=tuple(item.get("tags") or ()))
+            self.payloads[iid] = item.get("payload")
+        self.shown = len(rows)
+        self._paint_headings()
+        if self.on_render is not None:
+            self.on_render([self.items[r["\0index"]] for r in rows])
+
+    def payload_of(self, iid: str):
+        return self.payloads.get(iid)
+
+    @property
+    def filtered(self) -> bool:
+        return bool(self.filters)
+
+    # -- sort --------------------------------------------------------------
+    def set_sort(self, sort: tuple[str, bool] | None) -> None:
+        self.sort = sort if sort and sort[0] in self.columns else None
+        self.render()
+        if self.on_sort_change is not None:
+            self.on_sort_change(self.sort)
+
+    def toggle_sort(self, col: str) -> None:
+        if self.sort and self.sort[0] == col:
+            self.set_sort((col, not self.sort[1]))
+        else:
+            self.set_sort((col, False))
+
+    # -- filters -----------------------------------------------------------
+    def clear_filters(self) -> None:
+        self.filters.clear()
+        self.render()
+
+    def _paint_headings(self) -> None:
+        for col in self.columns:
+            text = self.headings.get(col, col)
+            if self.sort and self.sort[0] == col:
+                text += " ▼" if self.sort[1] else " ▲"
+            if col in self.filters:
+                text += " ▾"
+            self.tree.heading(col, text=text)
+
+    def column_at(self, x: int) -> str | None:
+        """Column name under a heading x position (for right-click)."""
+        ident = self.tree.identify_column(x)
+        if not ident.startswith("#"):
+            return None
+        index = int(ident[1:]) - 1
+        display = self.tree["displaycolumns"]
+        names = self.columns if display in ("#all", ("#all",)) else list(display)
+        return names[index] if 0 <= index < len(names) else None
+
+    def handle_right_click(self, event) -> bool:
+        """Open the filter popup when the click is on a heading. Returns True
+        if it was (the caller then skips its row menu)."""
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            return False
+        col = self.column_at(event.x)
+        if col is not None:
+            self.open_filter(col, event.x_root, event.y_root)
+        return True
+
+    def open_filter(self, col: str, x: int, y: int) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        idx = self.columns.index(col)
+        counts: dict[str, int] = {}
+        for item in self.items:
+            value = str(item["values"][idx])
+            counts[value] = counts.get(value, 0) + 1
+        kind = column_kind(list(counts))
+        values = sorted(counts, key=lambda v: sort_key(v, kind))
+        current = self.filters.get(col, {})
+        allowed = current.get("values")
+
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title(f"Filter: {self.headings.get(col, col)}")
+        win.transient(self.root)
+        body = ttk.Frame(win, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=self.headings.get(col, col),
+                  font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W)
+        sort_row = ttk.Frame(body)
+        sort_row.pack(fill=tk.X, pady=(6, 4))
+        ttk.Label(sort_row, text="Sort:").pack(side=tk.LEFT)
+
+        def sort_and_close(descending: bool) -> None:
+            win.destroy()
+            self.set_sort((col, descending))
+
+        low, high = (("1 → 9", "9 → 1") if kind == "num" else
+                     ("old → new", "new → old") if kind == "date" else ("A → Z", "Z → A"))
+        ttk.Button(sort_row, text=f"▲ {low}", command=lambda: sort_and_close(False)).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(sort_row, text=f"▼ {high}", command=lambda: sort_and_close(True)).pack(
+            side=tk.LEFT)
+        ttk.Separator(body).pack(fill=tk.X, pady=4)
+        contains = tk.StringVar(value=str(current.get("contains") or ""))
+        row = ttk.Frame(body)
+        row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row, text="Contains:").pack(side=tk.LEFT)
+        entry = ttk.Entry(row, textvariable=contains, width=28)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        picks = ttk.Frame(body)
+        picks.pack(fill=tk.X)
+        list_frame = ttk.Frame(body)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+        canvas = tk.Canvas(list_frame, height=min(240, 24 * max(1, len(values[:self.MAX_VALUES]))),
+                           width=300, highlightthickness=0)
+        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        checks: dict[str, tk.BooleanVar] = {}
+        for value in values[:self.MAX_VALUES]:
+            var = tk.BooleanVar(value=allowed is None or value in allowed)
+            checks[value] = var
+            label = value if value.strip() else "(empty)"
+            if len(label) > 60:
+                label = label[:57] + "…"
+            ttk.Checkbutton(inner, text=f"{label}  ({counts[value]})", variable=var).pack(
+                anchor=tk.W)
+        if len(values) > self.MAX_VALUES:
+            ttk.Label(body, text=f"{len(values) - self.MAX_VALUES} more values: use Contains",
+                      foreground="#666").pack(anchor=tk.W)
+        ttk.Button(picks, text="All", width=6,
+                   command=lambda: [v.set(True) for v in checks.values()]).pack(side=tk.LEFT)
+        ttk.Button(picks, text="None", width=6,
+                   command=lambda: [v.set(False) for v in checks.values()]).pack(side=tk.LEFT,
+                                                                                padx=4)
+
+        def apply(clear: bool = False) -> None:
+            if clear:
+                self.filters.pop(col, None)
+            else:
+                chosen = {v for v, var in checks.items() if var.get()}
+                everything = len(chosen) == len(checks) and len(values) <= self.MAX_VALUES
+                rule = {"values": None if everything else chosen,
+                        "contains": contains.get().strip()}
+                if rule["values"] is None and not rule["contains"]:
+                    self.filters.pop(col, None)
+                else:
+                    self.filters[col] = rule
+            win.destroy()
+            self.render()
+
+        bottom = ttk.Frame(body)
+        bottom.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(bottom, text="Clear filter", command=lambda: apply(clear=True)).pack(
+            side=tk.LEFT)
+        ttk.Button(bottom, text="OK", command=apply).pack(side=tk.RIGHT)
+        ttk.Button(bottom, text="Cancel", command=win.destroy).pack(side=tk.RIGHT, padx=4)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.bind("<Return>", lambda _e: apply())
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"+{min(max(0, x - 20), sw - w)}+{min(max(0, y + 10), sh - h)}")
+        win.deiconify()
+        entry.focus_set()
+
+
+# ---------------------------------------------------------------------------
 # Core generation pipeline (shared by CLI and GUI)
 # ---------------------------------------------------------------------------
 
@@ -2561,6 +2887,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Skip API, write placeholder PNG.")
     parser.add_argument("--gui", action="store_true", help="Force GUI mode.")
     parser.add_argument("--list-log", action="store_true", help="Print CSV log rows and exit.")
+    parser.add_argument("--log-filter", action="append", default=[], metavar="COLUMN=TEXT",
+                        help="With --list-log: keep rows whose COLUMN contains TEXT "
+                             "(case-insensitive; repeat for several columns).")
+    parser.add_argument("--log-sort", default=None, metavar="COLUMN[:desc]",
+                        help="With --list-log: sort by COLUMN (numbers/dates aware); "
+                             "the GUI Summary list remembers the same setting.")
     parser.add_argument("--analyse", action="append", default=[], metavar="DIR",
                         help="Analyse: compare the images of these folders (repeat, at least "
                              "1). Row N = the N-th newest image of each folder. Prints the "
@@ -2651,6 +2983,13 @@ def main_cli(args: argparse.Namespace) -> int:
         if not rows:
             print(f"no log entries at {log_path}")
             return 0
+        try:
+            rows = apply_table_view(rows, parse_log_filters(getattr(args, "log_filter", []),
+                                                            LOG_FIELDS),
+                                    parse_log_sort(getattr(args, "log_sort", None)))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         writer = csv.DictWriter(sys.stdout, fieldnames=LOG_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
@@ -3593,9 +3932,42 @@ def run_gui(defaults: dict | None = None) -> None:
     total_var = tk.StringVar(value="total: 0 ops / $0.000000")
     log_bottom = ttk.Frame(log_frame)
     log_bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
-    ttk.Label(log_bottom, textvariable=total_var).pack(side=tk.LEFT, anchor=tk.W)
-    ttk.Button(log_bottom, text="Refresh log",
-               command=lambda: refresh_log()).pack(side=tk.RIGHT)
+    # Buttons are packed first so they always keep their size; the totals
+    # text takes what is left and wraps instead of pushing them out.
+    refresh_log_btn = ttk.Button(log_bottom, text="Refresh log", command=lambda: refresh_log())
+    refresh_log_btn.pack(side=tk.RIGHT, anchor=tk.N)
+    clear_filters_btn = ttk.Button(log_bottom, text="Clear filters",
+                                   command=lambda: log_table.clear_filters())
+    clear_filters_btn.pack(side=tk.RIGHT, anchor=tk.N, padx=4)
+    totals_label = ttk.Label(log_bottom, textvariable=total_var, justify=tk.LEFT,
+                             wraplength=400)
+    totals_label.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor=tk.W)
+    log_bottom.bind("<Configure>", lambda e: totals_label.configure(
+        wraplength=max(120, e.width - refresh_log_btn.winfo_reqwidth()
+                       - clear_filters_btn.winfo_reqwidth() - 24)))
+    attach_help(clear_filters_btn, "Show all rows again. Click a column heading to sort, "
+                                   "right-click it to filter (like a spreadsheet).")
+    log_view: dict = {"total_rows": 0, "where": ""}
+
+    def on_log_render(visible: list[dict]) -> None:
+        cost = 0.0
+        for item in visible:
+            try:
+                cost += float(item["payload"].get("cost_usd") or 0)
+            except (ValueError, AttributeError):
+                pass
+        shown = (f"{len(visible)} of {log_view['total_rows']} ops"
+                 if log_table.filtered else f"{len(visible)} ops")
+        total_var.set(f"total: {shown} / ${cost:.6f}  ({log_view['where']})"
+                      + ("  — filtered" if log_table.filtered else ""))
+
+    try:
+        initial_sort = parse_log_sort(str(merged.get("log_sort") or ""))
+    except ValueError:
+        initial_sort = None
+    log_table = TreeTable(root, tree, list(columns),
+                          {col: col.replace("_", " ") for col in columns},
+                          on_render=on_log_render, sort=initial_sort)
 
     # ---- actions + clock (Generate tab) ----
     bar = ttk.Frame(tab_generate, padding=(4, 4))
@@ -3676,25 +4048,16 @@ def run_gui(defaults: dict | None = None) -> None:
             clock_var.set(f"elapsed: {state['elapsed']:.1f}s")
             state["after_id"] = root.after(100, tick_clock)
 
-    log_rows_cache: list[dict] = []
 
     def refresh_log() -> None:
         """Fill the Summary list, newest request on top. Besides the Output
         dir log it merges the logs written by the last batch (Dynamic output
         subfolders), so live progress shows every new image."""
-        for child in tree.get_children():
-            tree.delete(child)
         log_path = Path(out_var.get() or default_output_dir()) / LOG_FILENAME
         extra = [Path(p) for p in state.get("batch_logs", [])]
         rows = collect_log_rows([log_path, *extra])
-        total = 0.0
-        for row in rows:
-            try:
-                total += float(row.get("cost_usd") or 0)
-            except ValueError:
-                pass
-        log_rows_cache.clear()
-        for row in rows[:500]:
+        items = []
+        for row in rows[:5000]:
             values = []
             for col in columns:
                 raw = row.get(col, "") or ""
@@ -3707,20 +4070,19 @@ def run_gui(defaults: dict | None = None) -> None:
                 elif col == "model":
                     raw = raw[:60]
                 values.append(raw)
-            tree.insert("", tk.END, values=tuple(values))
-            log_rows_cache.append(row)
+            items.append({"values": tuple(values), "payload": row})
         extra_logs = {q.resolve() for q in extra} - {log_path.expanduser().resolve()}
-        where = f"{log_path}" + (f" + {len(extra_logs)} Dynamic log(s)" if extra_logs else "")
-        total_var.set(f"total: {len(rows)} ops / ${total:.6f}  ({where})")
+        log_view["total_rows"] = len(items)
+        log_view["where"] = f"{log_path}" + (f" + {len(extra_logs)} Dynamic log(s)"
+                                             if extra_logs else "")
+        log_table.set_items(items)
 
     def use_prompt_from_list() -> None:
         selection = tree.selection()
         if not selection:
             return
-        try:
-            index = tree.index(selection[0])
-            row = log_rows_cache[index]
-        except (tk.TclError, IndexError):
+        row = log_table.payload_of(selection[0])
+        if not isinstance(row, dict):
             return
         full = (row.get("prompt_full") or row.get("prompt_summary") or "").strip()
         if not full:
@@ -3735,6 +4097,8 @@ def run_gui(defaults: dict | None = None) -> None:
     list_menu.add_command(label="Use prompt", command=use_prompt_from_list)
 
     def show_list_menu(event: object) -> None:
+        if log_table.handle_right_click(event):  # heading -> column filter
+            return
         item = tree.identify_row(event.y)  # type: ignore[attr-defined]
         if item:
             tree.selection_set(item)
@@ -3983,6 +4347,8 @@ def run_gui(defaults: dict | None = None) -> None:
                 "analyse": list(analyse["folders"]),
                 "chosen_dir": chosen_var.get().strip(),
                 "prompt": prompt_text.get("1.0", "end-1c"),
+                "log_sort": (f"{log_table.sort[0]}:{'desc' if log_table.sort[1] else 'asc'}"
+                             if log_table.sort else ""),
             })
         except OSError:
             pass
@@ -4034,6 +4400,7 @@ def main(argv: list[str] | None = None) -> int:
             "--analyse": "analyse",
             "--chosen-dir": "chosen_dir",
             "--prompt": "prompt",
+            "--log-sort": "log_sort",
         }
         gui_defaults = {}
         for flag, key in flag_map.items():

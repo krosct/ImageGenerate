@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_story_generate -v
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import json
 import os
@@ -1131,6 +1132,23 @@ class CliTest(IsolatedMixin):
                          sg.DEFAULT_TTS_MODEL)
         self.assertEqual(sg.sanitize_config({"tts_model": "drama-3-preview"})["tts_model"],
                          sg.DEFAULT_TTS_MODEL)
+
+    def test_cli_list_log_filter_sort(self):
+        for name in ("a.png", "b.png"):
+            self.storyboard(name)
+        with redirect_stdout(io.StringIO()):
+            sg.main_cli(self.args(input_dir=str(self.tmp / "in")))
+        sg.log_failure(self.tmp / "out", self.tmp / "in" / "c.png", "boom", {"style": "connective"})
+        with redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(sg.main(["--list-log", "--output-dir", str(self.tmp / "out"),
+                                      "--log-filter", "status=ok", "--log-sort", "title"]), 0)
+        rows = list(csv.DictReader(io.StringIO(buf.getvalue())))
+        self.assertEqual([r["title"] for r in rows], ["Teste a", "Teste b"])
+        with redirect_stdout(io.StringIO()) as buf:
+            sg.main(["--list-log", "--output-dir", str(self.tmp / "out"),
+                     "--log-filter", "style=connective"])
+        self.assertEqual([r["status"] for r in csv.DictReader(io.StringIO(buf.getvalue()))],
+                         ["error"])
 
     def test_config_roundtrip_and_sanitize(self):
         sg.save_config({"voices": [{"id": VOICE_A, "label": "n"}], "tts_model": "nope",

@@ -185,7 +185,7 @@ def resolve_openrouter_key(cli_key: str | None = None) -> tuple[str | None, str]
 # ---------------------------------------------------------------------------
 
 CONFIG_KEYS = ("input_dir", "output_dir", "writer_model", "tts_model", "language",
-               "voices", "dry_run", "force", "style", "duration")
+               "voices", "dry_run", "force", "style", "duration", "log_sort")
 
 
 def config_path() -> Path:
@@ -238,6 +238,11 @@ def sanitize_config(data: dict) -> dict:
         clean["duration"] = duration
     except ValueError:
         clean["duration"] = ""
+    try:
+        clean["log_sort"] = str(data.get("log_sort") or "") if ig.parse_log_sort(
+            str(data.get("log_sort") or "")) else ""
+    except ValueError:
+        clean["log_sort"] = ""
     return clean
 
 
@@ -1895,6 +1900,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Print Fish Audio info for the configured voices and exit "
                              "(public, no key).")
     parser.add_argument("--list", action="store_true", help="List stories in the output dir.")
+    parser.add_argument("--list-log", action="store_true",
+                        help=f"Print the {LOG_FILENAME} rows (CSV) of the output dir and exit.")
+    parser.add_argument("--log-filter", action="append", default=[], metavar="COLUMN=TEXT",
+                        help="With --list-log: keep rows whose COLUMN contains TEXT "
+                             "(case-insensitive; repeat for several columns).")
+    parser.add_argument("--log-sort", default=None, metavar="COLUMN[:desc]",
+                        help="With --list-log: sort by COLUMN (numbers/dates aware); "
+                             "the GUI log list remembers the same setting.")
     parser.add_argument("--play", default="", metavar="FOLDER",
                         help="Play a story folder in the terminal (Ctrl+C stops).")
     parser.add_argument("--gui", action="store_true", help="Force GUI mode.")
@@ -1980,6 +1993,19 @@ def main_cli(args: argparse.Namespace) -> int:
         what = "audio of" if args.audio_only else "story"
         print(f"{'moved to the Trash' if method == 'trash' else 'deleted'}: {what} "
               f"{Path(args.delete).expanduser()}")
+        return 0
+    if getattr(args, "list_log", False):
+        rows = list(reversed(read_log_rows(Path(settings["output_dir"]).expanduser()
+                                           / LOG_FILENAME)))  # newest first, like the GUI
+        try:
+            rows = ig.apply_table_view(rows, ig.parse_log_filters(args.log_filter, LOG_FIELDS),
+                                       ig.parse_log_sort(args.log_sort))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        writer = csv.DictWriter(sys.stdout, fieldnames=LOG_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
         return 0
     if args.list:
         stories = list_stories(settings["output_dir"])
@@ -2299,8 +2325,39 @@ def run_gui(defaults: dict | None = None) -> None:
     tree_frame.rowconfigure(0, weight=1)
     tree_frame.columnconfigure(0, weight=1)
     total_var = tk.StringVar(value="")
-    ttk.Label(log_frame, textvariable=total_var).pack(anchor=tk.W, pady=(4, 0))
-    log_rows_by_item: dict[str, dict] = {}
+    totals_row = ttk.Frame(log_frame)
+    totals_row.pack(fill=tk.X, pady=(4, 0))
+    # The button is packed first so it always keeps its size; the totals text
+    # takes what is left and wraps instead of pushing the button out.
+    clear_filters_btn = ttk.Button(totals_row, text="Clear filters",
+                                   command=lambda: log_table.clear_filters())
+    clear_filters_btn.pack(side=tk.RIGHT, anchor=tk.N, padx=(8, 0))
+    totals_label = ttk.Label(totals_row, textvariable=total_var, justify=tk.LEFT,
+                             wraplength=400)
+    totals_label.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor=tk.W)
+    totals_row.bind("<Configure>", lambda e: totals_label.configure(
+        wraplength=max(120, e.width - clear_filters_btn.winfo_reqwidth() - 16)))
+    attach_help(clear_filters_btn, "Show all rows again. Click a column heading to sort, "
+                                   "right-click it to filter (like a spreadsheet).")
+    log_view: dict = {"rows": 0, "path": ""}
+
+    def on_log_render(visible: list[dict]) -> None:
+        rows = [item["payload"] for item in visible]
+        total = sum(row_cost(row) for row in rows)
+        ok = sum(1 for r in rows if (r.get("status") or "ok") in ("ok", "no audio"))
+        failed = sum(1 for r in rows if r.get("status") == "error")
+        shown = f"{len(rows)} of {log_view['rows']} rows: " if log_table.filtered else ""
+        total_var.set(f"total: {shown}{ok} stories, {failed} failed attempts / ${total:.6f} "
+                      f"(writer + narration)  ({log_view['path']})"
+                      + ("  — filtered" if log_table.filtered else ""))
+        autofit_columns()
+
+    try:
+        initial_sort = ig.parse_log_sort(str(merged.get("log_sort") or ""))
+    except ValueError:
+        initial_sort = None
+    log_table = ig.TreeTable(root, tree, list(columns), headings, on_render=on_log_render,
+                             sort=initial_sort)
     body_font = tkfont.nametofont("TkDefaultFont")
     heading_font = tkfont.nametofont("TkHeadingFont")
 
@@ -2367,16 +2424,12 @@ def run_gui(defaults: dict | None = None) -> None:
         status_var.set("row copied to the clipboard")
 
     def refresh_log() -> None:
-        for child in tree.get_children():
-            tree.delete(child)
-        log_rows_by_item.clear()
         log_path = current_out_dir() / LOG_FILENAME
         rows = list(reversed(read_log_rows(log_path)))
-        total = 0.0
         failed_now = {str(p) for p in failed_storyboards(current_out_dir(),
                                                           style_from_label(style_var.get()))}
+        items = []
         for row in rows:
-            total += row_cost(row)
             failed = row.get("status") == "error"
             values = []
             for col in columns:
@@ -2396,20 +2449,20 @@ def run_gui(defaults: dict | None = None) -> None:
                     values.append(row.get("error", "") if failed else row.get("folder", ""))
                 else:
                     values.append(row.get(col) or "")
-            item = tree.insert("", tk.END, values=tuple(values),
-                               tags=("error",) if failed else ())
-            log_rows_by_item[item] = row
-        autofit_columns()
+            # the date column shows "MM-DD HH:MM": sort by the full timestamp
+            sort_values = tuple(row.get("date") or "" if col == "date" else value
+                                for col, value in zip(columns, values))
+            items.append({"values": tuple(values), "tags": ("error",) if failed else (),
+                          "payload": row, "sort": sort_values})
+        log_view.update(rows=len(items), path=str(log_path))
+        log_table.set_items(items)
         failures = len(failed_now)
         retry_btn.configure(text=f"Retry failed ({failures})" if failures else "Retry failed",
                             state=tk.NORMAL if failures and not state["running"] else tk.DISABLED)
-        total_var.set(f"total: {sum(1 for r in rows if (r.get('status') or 'ok') in ('ok', 'no audio'))} stories, "
-                      f"{sum(1 for r in rows if r.get('status') == 'error')} failed attempts / "
-                      f"${total:.6f} (writer + narration)  ({log_path})")
 
     def selected_row() -> dict | None:
         selection = tree.selection()
-        return log_rows_by_item.get(selection[0]) if selection else None
+        return log_table.payload_of(selection[0]) if selection else None
 
     def open_row_in_player(row: dict) -> None:
         refresh_stories(select=current_out_dir() / row.get("folder", ""))
@@ -2439,11 +2492,15 @@ def run_gui(defaults: dict | None = None) -> None:
 
     def show_row_menu(event: object) -> None:
         hide_cell_tip()
+        if log_table.handle_right_click(event):  # heading -> column filter
+            return
         item = tree.identify_row(event.y)  # type: ignore[attr-defined]
         if not item:
             return
         tree.selection_set(item)
-        row = log_rows_by_item[item]
+        row = log_table.payload_of(item)
+        if not isinstance(row, dict):
+            return
         row_menu.delete(0, tk.END)
         row_menu.add_command(label="Copy row", command=lambda: copy_row(row))
         row_menu.add_separator()
@@ -2934,7 +2991,10 @@ def run_gui(defaults: dict | None = None) -> None:
                          "language": lang_var.get().strip(), "voices": current_voices(),
                          "dry_run": bool(dry_var.get()), "force": bool(force_var.get()),
                          "style": style_from_label(style_var.get()),
-                         "duration": duration_var.get().strip()})
+                         "duration": duration_var.get().strip(),
+                         "log_sort": (f"{log_table.sort[0]}:"
+                                      f"{'desc' if log_table.sort[1] else 'asc'}"
+                                      if log_table.sort else "")})
         except OSError:
             pass
 
@@ -3130,6 +3190,7 @@ def run_gui(defaults: dict | None = None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cli_work = bool(args.input_dir or args.image or args.retry_failed or args.list or args.play
+                    or args.list_log
                     or args.delete
                     or args.check_voices
                     or args.forget_key or args.remember_key)
