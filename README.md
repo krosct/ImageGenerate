@@ -66,6 +66,11 @@ Sirva com com `server.py` e acesse em `http://127.0.0.1:8000`.
 python3 web/server.py   # abre http://127.0.0.1:8000
 ```
 
+Para desenvolver com hot reload, basta `npm run dev` em `web/frontend`: o Vite sobe
+o frontend (`http://127.0.0.1:5173`) e também o backend (`web/server.py`), e
+derruba o backend ao sair. Se o backend já estiver rodando na porta 8000, ele é
+reaproveitado. Use `IMAGE_GENERATE_PYTHON` para apontar para outro interpretador.
+
 <p align="center"><img src="img/guiweb.png" alt="Web" width="520" /></p>
 
 ## 🧑‍💻 Versão CLI (terminal)

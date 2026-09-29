@@ -38,7 +38,7 @@ python3 -m unittest tests.test_web_server -v -k Generate -k generate
 | GUI config | `load/save/sanitize_gui_config` → `config.json` in the same dir; precedence: hard defaults < config file < explicit CLI flags |
 | CSV log | `LOG_FIELDS`, `read/write/append_log_entries`; `#` comment lines on top hold totals; GUI `Treeview` columns are generated from `LOG_FIELDS` |
 | GUI | `run_gui()` — Notebook tabs (Injection tab shown only when count > 1 and prompt has `{{vars}}`), spoiler log list, `on_generate`/`on_cancel`/`on_done`, hover `attach_help` tooltips, ratio-preview tooltip |
-| Web | `web/server.py` (FastAPI, localhost only) — jobs + SSE, mirrors the core; frontend `web/frontend/src` (Vite/React, build with `npm run build` in `web/frontend`) |
+| Web | `web/server.py` (FastAPI, localhost only) — jobs + SSE, mirrors the core; frontend `web/frontend/src` (Vite/React, build with `npm run build` in `web/frontend`; `npm run dev` starts BOTH Vite and `web/server.py` — plugin in `vite.config.ts`, reuses a backend already on port 8000, kills it on exit, `IMAGE_GENERATE_PYTHON` overrides the interpreter) |
 
 ## Conventions (must follow)
 
