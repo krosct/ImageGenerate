@@ -411,6 +411,32 @@ class ConfigProvidersKeysTest(WebBase):
         self.assertEqual(fetched["prop"], "1:1")
         self.assertEqual(fetched["model"], "m")
 
+    def test_web_save_keeps_desktop_only_settings(self):
+        # the Tk GUI stores keys the web form does not have (prompt, Analyse
+        # folders, chosen dir, list sort): a web save must not erase them
+        ig.save_gui_config({"output_dir": "/o", "prompt": "um gato", "analyse": ["/a", "/b"],
+                            "chosen_dir": "/c", "log_sort": "cost_usd:desc", "model": "old"})
+        resp = self.client.put("/api/config", json={
+            "output_dir": "/o", "context_dir": "", "memory_dir": "", "provider": "openrouter",
+            "model": "new", "summary_model": "s", "prop": "1:1", "resolution": "1K",
+            "output_format": "png", "dry_run": False})
+        self.assertEqual(resp.status_code, 200)
+        saved = ig.sanitize_gui_config(ig.load_gui_config())
+        self.assertEqual(saved["model"], "new")
+        self.assertEqual((saved["prompt"], saved["analyse"], saved["chosen_dir"],
+                          saved["log_sort"]), ("um gato", ["/a", "/b"], "/c", "cost_usd:desc"))
+
+    def test_prompt_shared_between_web_and_desktop(self):
+        ig.save_gui_config({"prompt": "prompt da GUI"})
+        self.assertEqual(self.client.get("/api/config").json()["prompt"], "prompt da GUI")
+        base = {"output_dir": "", "context_dir": "", "memory_dir": "", "provider": "openrouter",
+                "model": "", "summary_model": "", "prop": "1:1", "resolution": "1K",
+                "output_format": "png", "dry_run": False}
+        self.client.put("/api/config", json={**base, "prompt": "prompt da web"})
+        self.assertEqual(ig.sanitize_gui_config(ig.load_gui_config())["prompt"], "prompt da web")
+        self.client.put("/api/config", json=base)  # a save without prompt keeps it
+        self.assertEqual(ig.sanitize_gui_config(ig.load_gui_config())["prompt"], "prompt da web")
+
     def test_providers_lists_registry(self):
         body = self.client.get("/api/providers").json()
         ids = {p["id"] for p in body["providers"]}
@@ -451,3 +477,153 @@ class ConfigProvidersKeysTest(WebBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAS_WEB, "fastapi/httpx not installed")
+class LocalFilesAnalyseTest(WebBase):
+    """/api/file, /api/thumb and the Analyse endpoints (same core as the GUI)."""
+
+    def setUp(self):
+        super().setUp()
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def folder(self, name: str, count: int) -> Path:
+        folder = self.out / name
+        folder.mkdir()
+        for i in range(count):
+            path = folder / f"img_{i}.png"
+            ig.write_placeholder_png(path, 20 + i, 10)
+            os.utime(path, (1_700_000_000 + i * 10,) * 2)
+        return folder
+
+    def test_file_only_serves_known_types(self):
+        a = self.folder("A", 1)
+        self.assertEqual(self.client.get("/api/file", params={"path": str(a / "img_0.png")})
+                         .status_code, 200)
+        (a / "secret.txt").write_text("x")
+        self.assertEqual(self.client.get("/api/file", params={"path": str(a / "secret.txt")})
+                         .status_code, 404)
+        self.assertEqual(self.client.get("/api/file", params={"path": str(a / "nope.png")})
+                         .status_code, 404)
+        self.assertEqual(self.client.get("/api/thumb", params={"path": str(a / "img_0.png"),
+                                                               "size": 16}).status_code, 200)
+
+    def test_analyse_rows_and_choose(self):
+        a, b = self.folder("A", 3), self.folder("B", 2)
+        body = self.client.get("/api/analyse/rows", params={"folder": [str(a), str(b)]}).json()
+        self.assertEqual([f["count"] for f in body["folders"]], [3, 2])
+        self.assertEqual([[c["name"] if c else None for c in r] for r in body["rows"]],
+                         [["img_2.png", "img_1.png"], ["img_1.png", "img_0.png"],
+                          ["img_0.png", None]])
+        oldest = self.client.get("/api/analyse/rows", params={"folder": [str(a)],
+                                                               "newest_first": False}).json()
+        self.assertEqual(oldest["rows"][0][0]["name"], "img_0.png")
+        resp = self.client.post("/api/analyse/choose", json={
+            "folders": [str(a), str(b)], "picks": {"0": 1, "2": 0},
+            "output_dir": str(a)})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        dest = Path(resp.json()["folder"])
+        self.assertEqual(dest.parent, self.out / "chosen")  # next to the output dir
+        self.assertEqual(sorted(p.name for p in dest.glob("*.png")),
+                         ["1_B_img_1.png", "3_A_img_0.png"])
+        bad = self.client.post("/api/analyse/choose", json={"folders": [str(a), str(b)],
+                                                            "picks": {"2": 1}})
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(self.client.get("/api/analyse/rows", params={
+            "folder": [str(self.out / "missing")]}).status_code, 404)
+
+    def test_config_keeps_analyse_and_log_sort_from_web(self):
+        self.client.put("/api/config", json={"analyse": ["/a"], "chosen_dir": "/c",
+                                             "log_sort": "model:desc"})
+        saved = ig.sanitize_gui_config(ig.load_gui_config())
+        self.assertEqual((saved["analyse"], saved["chosen_dir"], saved["log_sort"]),
+                         (["/a"], "/c", "model:desc"))
+
+
+@unittest.skipUnless(HAS_WEB, "fastapi/httpx not installed")
+class StoryWebTest(WebBase):
+    """StoryGenerate over HTTP (dry-run only, no network)."""
+
+    def storyboards(self, *names: str) -> Path:
+        folder = self.out / "boards"
+        folder.mkdir(exist_ok=True)
+        for i, name in enumerate(names):
+            ig.write_placeholder_png(folder / name, 30 + i, 20)
+        return folder
+
+    def run_job(self, **body) -> dict:
+        resp = self.client.post("/api/story/generate", json={
+            "output_dir": str(self.out / "stories"), "dry_run": True, **body})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return self._wait_job(resp.json()["job_id"])
+
+    def test_meta_and_config_merge(self):
+        meta = self.client.get("/api/story/meta").json()
+        self.assertIn(sg_style := "connective", [s["id"] for s in meta["styles"]])
+        self.assertEqual(meta["max_voices"], 5)
+        import story_generate as sg
+        sg.save_config({"voices": [{"id": "a" * 32, "label": "x"}], "duration": "90"})
+        self.client.put("/api/story/config", json={"style": sg_style})
+        cfg = self.client.get("/api/story/config").json()
+        self.assertEqual((cfg["style"], cfg["duration"], cfg["voices"][0]["label"]),
+                         ("connective", "90", "x"))  # merged, nothing lost
+
+    def test_generate_log_stories_delete(self):
+        boards = self.storyboards("a.png", "b.png")
+        job = self.run_job(input_dir=str(boards), style="connective")
+        self.assertEqual(job["status"], "done", job.get("error"))
+        self.assertEqual(len(job["result"]["created"]), 2)
+        self.assertEqual(job["progress"]["done"], 2)
+        log = self.client.get("/api/story/log",
+                              params={"output_dir": str(self.out / "stories")}).json()
+        self.assertEqual([r["status"] for r in log["rows"]], ["ok", "ok"])
+        stories = self.client.get("/api/story/stories",
+                                  params={"output_dir": str(self.out / "stories")}).json()
+        labels = sorted(s["label"] for s in stories["stories"])
+        self.assertEqual(labels, ["Teste a - boards - Narrativo", "Teste b - boards - Narrativo"])
+        story = stories["stories"][0]
+        self.assertTrue(story["audio"].endswith("audio.wav"))
+        audio = self.client.get("/api/file", params={"path": story["audio"]},
+                                headers={"Range": "bytes=0-99"})
+        self.assertEqual(audio.status_code, 206)  # seeking works in the browser player
+        again = self.run_job(input_dir=str(boards), style="connective")
+        self.assertEqual(len(again["result"]["skipped"]), 2)
+        with mock.patch("story_generate.shutil.which", return_value=None):
+            resp = self.client.post("/api/story/delete", json={"folder": story["folder"],
+                                                               "audio_only": True})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        after = self.client.get("/api/story/stories",
+                                params={"output_dir": str(self.out / "stories")}).json()
+        self.assertTrue(any(s["audio_deleted"] for s in after["stories"]))
+
+    def test_failures_and_retry(self):
+        boards = self.storyboards("a.png")
+        import story_generate as sg
+        real = sg.generate_story
+        with mock.patch.object(sg, "generate_story", side_effect=RuntimeError("boom")):
+            job = self.run_job(input_dir=str(boards))
+        self.assertEqual(len(job["result"]["errors"]), 1)
+        log = self.client.get("/api/story/log", params={
+            "output_dir": str(self.out / "stories"), "style": "descriptive"}).json()
+        self.assertEqual(len(log["failed"]), 1)
+        del real
+        job = self.run_job(retry_failed=True, style="descriptive")
+        self.assertEqual(len(job["result"]["created"]), 1)
+        nothing = self.client.post("/api/story/generate", json={
+            "output_dir": str(self.out / "stories"), "retry_failed": True, "dry_run": True})
+        self.assertEqual(nothing.status_code, 400)
+
+    def test_validation(self):
+        boards = self.storyboards("a.png")
+        for body in ({"input_dir": str(boards), "dry_run": False},        # no voices
+                     {"input_dir": str(boards), "duration": "abc"},
+                     {"input_dir": str(self.out / "missing")}):
+            resp = self.client.post("/api/story/generate", json={
+                "output_dir": str(self.out / "stories"), "dry_run": True, **body})
+            self.assertEqual(resp.status_code, 400, body)
+        self.assertEqual(self.client.post("/api/story/voices/check", json={"voices": []})
+                         .status_code, 400)

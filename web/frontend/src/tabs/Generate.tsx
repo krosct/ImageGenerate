@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, DynamicDirs, listenJob, LogResponse } from '../api'
+import DataTable, { Row } from '../components/DataTable'
+import ContextMenu from '../components/ContextMenu'
+import { SortState } from '../tableView'
 import { extractTemplateVars, MAX_COUNT, MIN_COUNT, parseCountText, resolveInjectionRows } from '../injection'
 
 interface Props {
@@ -28,6 +31,8 @@ interface Props {
   injectionCells: string[][]
   setInjectionCells: (update: (old: string[][]) => string[][]) => void
   dynamicDirs: DynamicDirs
+  logSort: SortState | null
+  setLogSort: (sort: SortState | null) => void
 }
 
 function ratioBox(prop: string): { w: number; h: number } | null {
@@ -55,6 +60,7 @@ export default function Generate(p: Props) {
   const [pendingCount, setPendingCount] = useState(1)
   const [pendingInjection, setPendingInjection] = useState<Record<string, string>[] | undefined>()
   const audioRef = useRef<AudioContext | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; row: Record<string, string> } | null>(null)
   // Log dirs written by the current/last batch (Dynamic output subfolders),
   // merged into the log list; reset when the Output dir changes.
   const batchLogDirs = useRef<string[]>([])
@@ -360,22 +366,27 @@ export default function Generate(p: Props) {
           </div>
           {!log && <div className="hint">loading…</div>}
           {log && (
-            <>
-              <div className="hint">total: {log.total_ops} ops / ${log.total_cost.toFixed(6)}</div>
-              <div className="logwrap">
-                <table className="log">
-                  <thead><tr>{log.fields.map((f) => <th key={f}>{f.replace(/_/g, ' ')}</th>)}</tr></thead>
-                  <tbody>
-                    {log.rows.map((row, i) => (
-                      <tr key={i} onClick={() => p.onUsePrompt(row.prompt_full || row.prompt_summary || '')}
-                          title="Use prompt">
-                        {log.fields.map((f) => <td key={f}>{(row[f] ?? '').slice(0, 120)}</td>)}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
+            <DataTable
+              columns={log.fields.map((f) => ({ key: f, label: f.replace(/_/g, ' ') }))}
+              rows={log.rows.map((row, i): Row<Record<string, string>> => ({
+                id: String(i),
+                cells: Object.fromEntries(log.fields.map((f) => [f, (row[f] ?? '').slice(0, 300)])),
+                payload: row,
+              }))}
+              sort={p.logSort} onSortChange={p.setLogSort}
+              rowTitle="Click: use this prompt · right-click: menu"
+              onRowClick={(r) => p.onUsePrompt(r.payload.prompt_full || r.payload.prompt_summary || '')}
+              onRowContextMenu={(r, x, y) => setMenu({ x, y, row: r.payload })}
+              footer={(visible, total, filtered) => {
+                const cost = visible.reduce((sum, r) => sum + (Number(r.payload.cost_usd) || 0), 0)
+                return `total: ${filtered ? `${visible.length} of ${total}` : visible.length} ops / $${cost.toFixed(6)}`
+                  + (filtered ? ' — filtered' : '')
+              }} />
+          )}
+          {menu && (
+            <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[
+              { label: 'Use prompt', onClick: () => p.onUsePrompt(menu.row.prompt_full || menu.row.prompt_summary || '') },
+            ]} />
           )}
         </div>
       )}

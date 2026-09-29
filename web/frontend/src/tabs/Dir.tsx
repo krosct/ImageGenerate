@@ -93,7 +93,7 @@ export default function Dir(p: Props) {
   )
 }
 
-function FolderPicker({ initial, title, onPick, onClose }: {
+export function FolderPicker({ initial, title, onPick, onClose }: {
   initial: string
   title: string
   onPick: (dir: string) => void
